@@ -53,7 +53,7 @@ Summary: PostgreSQL client programs
 Name: postgresql
 %global majorversion 8.4
 Version: 8.4.20
-Release: 6%{?dist}
+Release: 7%{?dist}
 # The PostgreSQL license is very similar to other MIT licenses, but the OSI
 # recognizes it as an independent license, so we do as well.
 License: PostgreSQL
@@ -741,6 +741,10 @@ rm -rf $RPM_BUILD_ROOT
 %endif
 
 %changelog
+* Thu Sep 08 2016 Pavel Raiskup <praiskup@redhat.com> - 8.4.20-7
+- backport PGSTARTTIMEOUT variable from latest RHSCL while reasonably
+  changing wait timeout to 2 seconds by default
+
 * Wed Feb 24 2016 Pavel Raiskup <praiskup@redhat.com> - 8.4.20-6
 - allow TLS > 1.0 (rhbz#1287053)
 

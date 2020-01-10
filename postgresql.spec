@@ -53,7 +53,7 @@ Summary: PostgreSQL client programs
 Name: postgresql
 %global majorversion 8.4
 Version: 8.4.20
-Release: 7%{?dist}
+Release: 8%{?dist}
 # The PostgreSQL license is very similar to other MIT licenses, but the OSI
 # recognizes it as an independent license, so we do as well.
 License: PostgreSQL
@@ -91,6 +91,7 @@ Patch15: postgresql-CVE-2015-5288.patch
 Patch16: postgresql-CVE-2016-0773.patch
 Patch17: postgresql-libxml2-test.patch
 Patch18: postgresql-tls-1.0-plus.patch
+Patch19: postgresql-CVE-2017-7546.patch
 
 BuildRequires: perl(ExtUtils::MakeMaker) glibc-devel bison flex autoconf gawk
 BuildRequires: perl(ExtUtils::Embed), perl-devel
@@ -307,6 +308,7 @@ system, including regression tests and benchmarks.
 %patch16 -p1
 %patch17 -p1
 %patch18 -p1
+%patch19 -p1
 
 autoconf
 
@@ -741,6 +743,9 @@ rm -rf $RPM_BUILD_ROOT
 %endif
 
 %changelog
+* Tue Aug 29 2017 Petr Kubat <pkubat@redhat.com> - 8.4.20-8
+- backport fix for CVE-2017-7546 (rhbz#1484677)
+
 * Thu Sep 08 2016 Pavel Raiskup <praiskup@redhat.com> - 8.4.20-7
 - backport PGSTARTTIMEOUT variable from latest RHSCL while reasonably
   changing wait timeout to 2 seconds by default

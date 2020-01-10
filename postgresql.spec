@@ -53,7 +53,7 @@ Summary: PostgreSQL client programs
 Name: postgresql
 %global majorversion 8.4
 Version: 8.4.20
-Release: 5%{?dist}
+Release: 6%{?dist}
 # The PostgreSQL license is very similar to other MIT licenses, but the OSI
 # recognizes it as an independent license, so we do as well.
 License: PostgreSQL
@@ -90,6 +90,7 @@ Patch14: postgresql-CVE-2015-3167.patch
 Patch15: postgresql-CVE-2015-5288.patch
 Patch16: postgresql-CVE-2016-0773.patch
 Patch17: postgresql-libxml2-test.patch
+Patch18: postgresql-tls-1.0-plus.patch
 
 BuildRequires: perl(ExtUtils::MakeMaker) glibc-devel bison flex autoconf gawk
 BuildRequires: perl(ExtUtils::Embed), perl-devel
@@ -305,6 +306,7 @@ system, including regression tests and benchmarks.
 %patch15 -p1
 %patch16 -p1
 %patch17 -p1
+%patch18 -p1
 
 autoconf
 
@@ -739,6 +741,9 @@ rm -rf $RPM_BUILD_ROOT
 %endif
 
 %changelog
+* Wed Feb 24 2016 Pavel Raiskup <praiskup@redhat.com> - 8.4.20-6
+- allow TLS > 1.0 (rhbz#1287053)
+
 * Tue Feb 16 2016 Pavel Raiskup <praiskup@redhat.com> - 8.4.20-5
 - fix for CVE-2016-0773 (rhbz#1308598)
 - fix tests for new libxml2 (rhbz#1303972)

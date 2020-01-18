@@ -380,7 +380,7 @@ s{PG_VERSION_STR "[^"]+"}{__STRINGIFY(x) #x\n#define __STRINGIFY2(z) __STRINGIFY
 		  || confess "Could not open ecpg_config.h";
 		print O <<EOF;
 #if (_MSC_VER > 1200)
-#define HAVE_LONG_LONG_INT_64 1
+#define HAVE_LONG_LONG_INT_64
 #define ENABLE_THREAD_SAFETY 1
 EOF
 		print O "#define USE_INTEGER_DATETIMES 1\n"
@@ -484,20 +484,10 @@ sub AddProject
 	if ($self->{options}->{openssl})
 	{
 		$proj->AddIncludeDir($self->{options}->{openssl} . '\include');
-		if (-e "$self->{options}->{openssl}/lib/VC/ssleay32MD.lib")
-		{
-			$proj->AddLibrary(
-				$self->{options}->{openssl} . '\lib\VC\ssleay32.lib', 1);
-			$proj->AddLibrary(
-				$self->{options}->{openssl} . '\lib\VC\libeay32.lib', 1);
-		}
-		else
-		{
-			$proj->AddLibrary(
-				$self->{options}->{openssl} . '\lib\ssleay32.lib', 1);
-			$proj->AddLibrary(
-				$self->{options}->{openssl} . '\lib\libeay32.lib', 1);
-		}
+		$proj->AddLibrary(
+			$self->{options}->{openssl} . '\lib\VC\ssleay32.lib', 1);
+		$proj->AddLibrary(
+			$self->{options}->{openssl} . '\lib\VC\libeay32.lib', 1);
 	}
 	if ($self->{options}->{nls})
 	{
@@ -521,7 +511,6 @@ sub AddProject
 	if ($self->{options}->{xml})
 	{
 		$proj->AddIncludeDir($self->{options}->{xml} . '\include');
-		$proj->AddIncludeDir($self->{options}->{xml} . '\include\libxml2');
 		$proj->AddLibrary($self->{options}->{xml} . '\lib\libxml2.lib');
 	}
 	if ($self->{options}->{xslt})

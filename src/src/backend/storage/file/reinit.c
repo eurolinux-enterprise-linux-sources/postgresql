@@ -47,7 +47,7 @@ typedef struct
 void
 ResetUnloggedRelations(int op)
 {
-	char		temp_path[MAXPGPATH + 10 + sizeof(TABLESPACE_VERSION_DIRECTORY)];
+	char		temp_path[MAXPGPATH];
 	DIR		   *spc_dir;
 	struct dirent *spc_de;
 	MemoryContext tmpctx,
@@ -105,7 +105,7 @@ ResetUnloggedRelationsInTablespaceDir(const char *tsdirname, int op)
 {
 	DIR		   *ts_dir;
 	struct dirent *de;
-	char		dbspace_path[MAXPGPATH * 2];
+	char		dbspace_path[MAXPGPATH];
 
 	ts_dir = AllocateDir(tsdirname);
 	if (ts_dir == NULL)
@@ -146,7 +146,7 @@ ResetUnloggedRelationsInDbspaceDir(const char *dbspacedirname, int op)
 {
 	DIR		   *dbspace_dir;
 	struct dirent *de;
-	char		rm_path[MAXPGPATH * 2];
+	char		rm_path[MAXPGPATH];
 
 	/* Caller must specify at least one operation. */
 	Assert((op & (UNLOGGED_RELATION_CLEANUP | UNLOGGED_RELATION_INIT)) != 0);
@@ -309,7 +309,7 @@ ResetUnloggedRelationsInDbspaceDir(const char *dbspacedirname, int op)
 			ForkNumber	forkNum;
 			int			oidchars;
 			char		oidbuf[OIDCHARS + 1];
-			char		srcpath[MAXPGPATH * 2];
+			char		srcpath[MAXPGPATH];
 			char		dstpath[MAXPGPATH];
 
 			/* Skip anything that doesn't look like a relation data file. */

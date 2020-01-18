@@ -130,8 +130,7 @@ scalararraysel_containment(PlannerInfo *root,
 		useOr = !useOr;
 
 	/* Get array element stats for var, if available */
-	if (HeapTupleIsValid(vardata.statsTuple) &&
-		statistic_proc_security_check(&vardata, cmpfunc->fn_oid))
+	if (HeapTupleIsValid(vardata.statsTuple))
 	{
 		Form_pg_statistic stats;
 		Datum	   *values;
@@ -362,8 +361,7 @@ calc_arraycontsel(VariableStatData *vardata, Datum constval,
 	 */
 	array = DatumGetArrayTypeP(constval);
 
-	if (HeapTupleIsValid(vardata->statsTuple) &&
-		statistic_proc_security_check(vardata, cmpfunc->fn_oid))
+	if (HeapTupleIsValid(vardata->statsTuple))
 	{
 		Form_pg_statistic stats;
 		Datum	   *values;

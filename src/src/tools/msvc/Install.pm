@@ -190,7 +190,7 @@ sub CopySolutionOutput
 	my $conf   = shift;
 	my $target = shift;
 	my $rem =
-	  qr{Project\("\{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942\}"\) = "([^"]+)"};
+	  qr{Project\("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}"\) = "([^"]+)"};
 
 	my $sln = read_file("pgsql.sln") || croak "Could not open pgsql.sln\n";
 
@@ -308,20 +308,15 @@ sub GenerateTimezoneFiles
 	my $conf   = shift;
 	my $mf     = read_file("src/timezone/Makefile");
 	$mf =~ s{\\\s*[\r\n]+}{}mg;
-
 	$mf =~ /^TZDATA\s*:?=\s*(.*)$/m
 	  || die "Could not find TZDATA line in timezone makefile\n";
 	my @tzfiles = split /\s+/, $1;
 
-	$mf =~ /^POSIXRULES\s*:?=\s*(.*)$/m
-	  || die "Could not find POSIXRULES line in timezone makefile\n";
-	my $posixrules = $1;
-	$posixrules =~ s/\s+//g;
-
 	print "Generating timezone files...";
 
-	my @args = ("$conf/zic/zic", '-d', "$target/share/timezone",
-				'-p', "$posixrules");
+	my @args = ("$conf/zic/zic",
+				'-d',
+				"$target/share/timezone");
 	foreach (@tzfiles)
 	{
 		my $tzfile = $_;

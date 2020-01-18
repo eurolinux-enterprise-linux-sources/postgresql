@@ -345,29 +345,6 @@ typedef struct XLogwrtResult
 } XLogwrtResult;
 
 /*
- * State of an exclusive backup, necessary to control concurrent activities
- * across sessions when working on exclusive backups.
- *
- * EXCLUSIVE_BACKUP_NONE means that there is no exclusive backup actually
- * running, to be more precise pg_start_backup() is not being executed for
- * an exclusive backup and there is no exclusive backup in progress.
- * EXCLUSIVE_BACKUP_STARTING means that pg_start_backup() is starting an
- * exclusive backup.
- * EXCLUSIVE_BACKUP_IN_PROGRESS means that pg_start_backup() has finished
- * running and an exclusive backup is in progress. pg_stop_backup() is
- * needed to finish it.
- * EXCLUSIVE_BACKUP_STOPPING means that pg_stop_backup() is stopping an
- * exclusive backup.
- */
-typedef enum ExclusiveBackupState
-{
-	EXCLUSIVE_BACKUP_NONE = 0,
-	EXCLUSIVE_BACKUP_STARTING,
-	EXCLUSIVE_BACKUP_IN_PROGRESS,
-	EXCLUSIVE_BACKUP_STOPPING
-} ExclusiveBackupState;
-
-/*
  * Shared state data for XLogInsert.
  */
 typedef struct XLogCtlInsert
@@ -389,15 +366,13 @@ typedef struct XLogCtlInsert
 	bool		fullPageWrites;
 
 	/*
-	 * exclusiveBackupState indicates the state of an exclusive backup
-	 * (see comments of ExclusiveBackupState for more details).
-	 * nonExclusiveBackups is a counter indicating the number of streaming
-	 * base backups currently in progress. forcePageWrites is set to true
-	 * when either of these is non-zero. lastBackupStart is the latest
-	 * checkpoint redo location used as a starting point for an online
-	 * backup.
+	 * exclusiveBackup is true if a backup started with pg_start_backup() is
+	 * in progress, and nonExclusiveBackups is a counter indicating the number
+	 * of streaming base backups currently in progress. forcePageWrites is set
+	 * to true when either of these is non-zero. lastBackupStart is the latest
+	 * checkpoint redo location used as a starting point for an online backup.
 	 */
-	ExclusiveBackupState exclusiveBackupState;
+	bool		exclusiveBackup;
 	int			nonExclusiveBackups;
 	XLogRecPtr	lastBackupStart;
 } XLogCtlInsert;
@@ -480,14 +455,11 @@ typedef struct XLogCtlData
 
 	/*
 	 * During recovery, we keep a copy of the latest checkpoint record here.
-	 * lastCheckPointRecPtr points to start of checkpoint record and
-	 * lastCheckPointEndPtr points to end+1 of checkpoint record.  Used by the
-	 * background writer when it wants to create a restartpoint.
+	 * Used by the background writer when it wants to create a restartpoint.
 	 *
 	 * Protected by info_lck.
 	 */
 	XLogRecPtr	lastCheckPointRecPtr;
-	XLogRecPtr	lastCheckPointEndPtr;
 	CheckPoint	lastCheckPoint;
 
 	/*
@@ -617,8 +589,8 @@ static uint32 readRecordBufSize = 0;
 /* State information for XLOG reading */
 static XLogRecPtr ReadRecPtr;	/* start of last record read */
 static XLogRecPtr EndRecPtr;	/* end+1 of last record read */
-static XLogRecPtr latestPagePtr;	/* start of last page read */
-static TimeLineID latestPageTLI = 0;
+static TimeLineID lastPageTLI = 0;
+static TimeLineID lastSegmentTLI = 0;
 
 static XLogRecPtr minRecoveryPoint;		/* local copy of
 										 * ControlFile->minRecoveryPoint */
@@ -684,7 +656,7 @@ static bool InstallXLogFileSegment(uint32 *log, uint32 *seg, char *tmppath,
 					   bool find_free, int *max_advance,
 					   bool use_lock);
 static int XLogFileRead(uint32 log, uint32 seg, int emode, TimeLineID tli,
-			 int source, bool notfoundOk);
+			 int source, bool notexistOk);
 static int XLogFileReadAnyTLI(uint32 log, uint32 seg, int emode,
 				   int sources);
 static bool XLogPageRead(XLogRecPtr *RecPtr, int emode, bool fetching_ckpt,
@@ -706,7 +678,7 @@ static void CleanupBackupHistory(void);
 static void UpdateMinRecoveryPoint(XLogRecPtr lsn, bool force);
 static XLogRecord *ReadRecord(XLogRecPtr *RecPtr, int emode, bool fetching_ckpt);
 static void CheckRecoveryConsistency(void);
-static bool ValidXLOGHeader(XLogPageHeader hdr, int emode);
+static bool ValidXLOGHeader(XLogPageHeader hdr, int emode, bool segmentonly);
 static XLogRecord *ReadCheckpointRecord(XLogRecPtr RecPtr, int whichChkpt);
 static List *readTimeLineHistory(TimeLineID targetTLI);
 static bool existsTimeLineHistory(TimeLineID probeTLI);
@@ -724,7 +696,6 @@ static bool CheckForStandbyTrigger(void);
 static void xlog_outrec(StringInfo buf, XLogRecord *record);
 #endif
 static void pg_start_backup_callback(int code, Datum arg);
-static void pg_stop_backup_callback(int code, Datum arg);
 static bool read_backup_label(XLogRecPtr *checkPointLoc,
 				  bool *backupEndRequired, bool *backupFromStandby);
 static void rm_redo_error_callback(void *arg);
@@ -3630,7 +3601,7 @@ RemoveXlogFile(const char *segname, XLogRecPtr endptr)
 	 * Initialize info about where to try to recycle to.  We allow recycling
 	 * segments up to XLOGfileslop segments beyond the current XLOG location.
 	 */
-	XLByteToSeg(endptr, endlogId, endlogSeg);
+	XLByteToPrevSeg(endptr, endlogId, endlogSeg);
 	max_advance = XLOGfileslop;
 
 	snprintf(path, MAXPGPATH, XLOGDIR "/%s", segname);
@@ -3757,7 +3728,7 @@ CleanupBackupHistory(void)
 {
 	DIR		   *xldir;
 	struct dirent *xlde;
-	char		path[MAXPGPATH + sizeof(XLOGDIR)];
+	char		path[MAXPGPATH];
 
 	xldir = AllocateDir(XLOGDIR);
 	if (xldir == NULL)
@@ -3778,7 +3749,7 @@ CleanupBackupHistory(void)
 				ereport(DEBUG2,
 				(errmsg("removing transaction log backup history file \"%s\"",
 						xlde->d_name)));
-				snprintf(path, sizeof(path), XLOGDIR "/%s", xlde->d_name);
+				snprintf(path, MAXPGPATH, XLOGDIR "/%s", xlde->d_name);
 				unlink(path);
 				XLogArchiveCleanup(xlde->d_name);
 			}
@@ -4021,6 +3992,14 @@ ReadRecord(XLogRecPtr *RecPtr, int emode, bool fetching_ckpt)
 					(errmsg("invalid record offset at %X/%X",
 							RecPtr->xlogid, RecPtr->xrecoff)));
 
+		/*
+		 * Since we are going to a random position in WAL, forget any prior
+		 * state about what timeline we were in, and allow it to be any
+		 * timeline in expectedTLIs.  We also set a flag to allow curFileTLI
+		 * to go backwards (but we can't reset that variable right here, since
+		 * we might not change files at all).
+		 */
+		lastPageTLI = lastSegmentTLI = 0;	/* see comment in ValidXLOGHeader */
 		randAccess = true;		/* allow curFileTLI to go backwards too */
 	}
 
@@ -4338,7 +4317,7 @@ next_record_is_invalid:
  * ReadRecord.  It's not intended for use from anywhere else.
  */
 static bool
-ValidXLOGHeader(XLogPageHeader hdr, int emode)
+ValidXLOGHeader(XLogPageHeader hdr, int emode, bool segmentonly)
 {
 	XLogRecPtr	recaddr;
 
@@ -4432,25 +4411,31 @@ ValidXLOGHeader(XLogPageHeader hdr, int emode)
 	 * immediate parent's TLI, we should never see TLI go backwards across
 	 * successive pages of a consistent WAL sequence.
 	 *
-	 * Sometimes we re-read a segment that's already been (partially) read.
-	 * This can happen when we read WAL segments from parent's TLI during
-	 * archive recovery, refer XLogFileReadAnyTLI.  So we only verify TLIs
-	 * for pages that are later than the last remembered LSN.
+	 * Of course this check should only be applied when advancing sequentially
+	 * across pages; therefore ReadRecord resets lastPageTLI and
+	 * lastSegmentTLI to zero when going to a random page.
+	 *
+	 * Sometimes we re-open a segment that's already been partially replayed.
+	 * In that case we cannot perform the normal TLI check: if there is a
+	 * timeline switch within the segment, the first page has a smaller TLI
+	 * than later pages following the timeline switch, and we might've read
+	 * them already. As a weaker test, we still check that it's not smaller
+	 * than the TLI we last saw at the beginning of a segment. Pass
+	 * segmentonly = true when re-validating the first page like that, and the
+	 * page you're actually interested in comes later.
 	 */
-	if (XLByteLT(latestPagePtr, recaddr))
+	if (hdr->xlp_tli < (segmentonly ? lastSegmentTLI : lastPageTLI))
 	{
-		if (hdr->xlp_tli < latestPageTLI)
-		{
-			ereport(emode_for_corrupt_record(emode, recaddr),
-					(errmsg("out-of-sequence timeline ID %u (after %u) in log file %u, segment %u, offset %u",
-							hdr->xlp_tli,
-							latestPageTLI,
-							readId, readSeg, readOff)));
-			return false;
-		}
+		ereport(emode_for_corrupt_record(emode, recaddr),
+				(errmsg("out-of-sequence timeline ID %u (after %u) in log file %u, segment %u, offset %u",
+						hdr->xlp_tli,
+						segmentonly ? lastSegmentTLI : lastPageTLI,
+						readId, readSeg, readOff)));
+		return false;
 	}
-	latestPagePtr = recaddr;
-	latestPageTLI = hdr->xlp_tli;
+	lastPageTLI = hdr->xlp_tli;
+	if (readOff == 0)
+		lastSegmentTLI = hdr->xlp_tli;
 
 	return true;
 }
@@ -5619,8 +5604,7 @@ readRecoveryCommandFile(void)
 				rtli = (TimeLineID) strtoul(item->value, NULL, 0);
 				if (errno == EINVAL || errno == ERANGE)
 					ereport(FATAL,
-							(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-							 errmsg("recovery_target_timeline is not a valid number: \"%s\"",
+							(errmsg("recovery_target_timeline is not a valid number: \"%s\"",
 									item->value)));
 			}
 			if (rtli)
@@ -5636,8 +5620,7 @@ readRecoveryCommandFile(void)
 			recoveryTargetXid = (TransactionId) strtoul(item->value, NULL, 0);
 			if (errno == EINVAL || errno == ERANGE)
 				ereport(FATAL,
-						(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-				  errmsg("recovery_target_xid is not a valid number: \"%s\"",
+				 (errmsg("recovery_target_xid is not a valid number: \"%s\"",
 						 item->value)));
 			ereport(DEBUG2,
 					(errmsg_internal("recovery_target_xid = %u",
@@ -5728,8 +5711,7 @@ readRecoveryCommandFile(void)
 		}
 		else
 			ereport(FATAL,
-					(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-					 errmsg("unrecognized recovery parameter \"%s\"",
+					(errmsg("unrecognized recovery parameter \"%s\"",
 							item->name)));
 	}
 
@@ -5748,19 +5730,9 @@ readRecoveryCommandFile(void)
 	{
 		if (recoveryRestoreCommand == NULL)
 			ereport(FATAL,
-					(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-					 errmsg("recovery command file \"%s\" must specify restore_command when standby mode is not enabled",
+					(errmsg("recovery command file \"%s\" must specify restore_command when standby mode is not enabled",
 							RECOVERY_COMMAND_FILE)));
 	}
-
-	/*
-	 * We don't support standby_mode in standalone backends; that requires
-	 * other processes such as the WAL receiver to be alive.
-	 */
-	if (StandbyModeRequested && !IsUnderPostmaster)
-		ereport(FATAL,
-				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-			errmsg("standby mode is not supported by single-user servers")));
 
 	/* Enable fetching from archive recovery area */
 	ArchiveRecoveryRequested = true;
@@ -5778,8 +5750,7 @@ readRecoveryCommandFile(void)
 			/* Timeline 1 does not have a history file, all else should */
 			if (rtli != 1 && !existsTimeLineHistory(rtli))
 				ereport(FATAL,
-						(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-						 errmsg("recovery target timeline %u does not exist",
+						(errmsg("recovery target timeline %u does not exist",
 								rtli)));
 			recoveryTargetTLI = rtli;
 			recoveryTargetIsLatest = false;
@@ -8568,7 +8539,6 @@ RecoveryRestartPoint(const CheckPoint *checkPoint)
 	 */
 	SpinLockAcquire(&xlogctl->info_lck);
 	XLogCtl->lastCheckPointRecPtr = ReadRecPtr;
-	XLogCtl->lastCheckPointEndPtr = EndRecPtr;
 	memcpy(&XLogCtl->lastCheckPoint, checkPoint, sizeof(CheckPoint));
 	SpinLockRelease(&xlogctl->info_lck);
 }
@@ -8588,7 +8558,6 @@ bool
 CreateRestartPoint(int flags)
 {
 	XLogRecPtr	lastCheckPointRecPtr;
-	XLogRecPtr	lastCheckPointEndPtr;
 	CheckPoint	lastCheckPoint;
 	uint32		_logId;
 	uint32		_logSeg;
@@ -8606,7 +8575,6 @@ CreateRestartPoint(int flags)
 	/* Get a local copy of the last safe checkpoint record. */
 	SpinLockAcquire(&xlogctl->info_lck);
 	lastCheckPointRecPtr = xlogctl->lastCheckPointRecPtr;
-	lastCheckPointEndPtr = xlogctl->lastCheckPointEndPtr;
 	memcpy(&lastCheckPoint, &XLogCtl->lastCheckPoint, sizeof(CheckPoint));
 	SpinLockRelease(&xlogctl->info_lck);
 
@@ -8706,25 +8674,6 @@ CreateRestartPoint(int flags)
 		ControlFile->checkPoint = lastCheckPointRecPtr;
 		ControlFile->checkPointCopy = lastCheckPoint;
 		ControlFile->time = (pg_time_t) time(NULL);
-
-		/*
-		 * Ensure minRecoveryPoint is past the checkpoint record.  Normally,
-		 * this will have happened already while writing out dirty buffers,
-		 * but not necessarily - e.g. because no buffers were dirtied.  We do
-		 * this because a non-exclusive base backup uses minRecoveryPoint to
-		 * determine which WAL files must be included in the backup, and the
-		 * file (or files) containing the checkpoint record must be included,
-		 * at a minimum. Note that for an ordinary restart of recovery there's
-		 * no value in having the minimum recovery point any earlier than this
-		 * anyway, because redo will begin just after the checkpoint record.
-		 */
-		if (XLByteLT(ControlFile->minRecoveryPoint, lastCheckPointEndPtr))
-		{
-			ControlFile->minRecoveryPoint = lastCheckPointEndPtr;
-
-			/* update local copy */
-			minRecoveryPoint = ControlFile->minRecoveryPoint;
-		}
 		if (flags & CHECKPOINT_IS_SHUTDOWN)
 			ControlFile->state = DB_SHUTDOWNED_IN_RECOVERY;
 		UpdateControlFile();
@@ -9655,12 +9604,7 @@ do_pg_start_backup(const char *backupidstr, bool fast, char **labelfile)
 	LWLockAcquire(WALInsertLock, LW_EXCLUSIVE);
 	if (exclusive)
 	{
-		/*
-		 * At first, mark that we're now starting an exclusive backup,
-		 * to ensure that there are no other sessions currently running
-		 * pg_start_backup() or pg_stop_backup().
-		 */
-		if (XLogCtl->Insert.exclusiveBackupState != EXCLUSIVE_BACKUP_NONE)
+		if (XLogCtl->Insert.exclusiveBackup)
 		{
 			LWLockRelease(WALInsertLock);
 			ereport(ERROR,
@@ -9668,7 +9612,7 @@ do_pg_start_backup(const char *backupidstr, bool fast, char **labelfile)
 					 errmsg("a backup is already in progress"),
 					 errhint("Run pg_stop_backup() and try again.")));
 		}
-		XLogCtl->Insert.exclusiveBackupState = EXCLUSIVE_BACKUP_STARTING;
+		XLogCtl->Insert.exclusiveBackup = true;
 	}
 	else
 		XLogCtl->Insert.nonExclusiveBackups++;
@@ -9827,7 +9771,7 @@ do_pg_start_backup(const char *backupidstr, bool fast, char **labelfile)
 		{
 			/*
 			 * Check for existing backup label --- implies a backup is already
-			 * running.  (XXX given that we checked exclusiveBackupState above,
+			 * running.  (XXX given that we checked exclusiveBackup above,
 			 * maybe it would be OK to just unlink any such label file?)
 			 */
 			if (stat(BACKUP_LABEL_FILE, &stat_buf) != 0)
@@ -9869,16 +9813,6 @@ do_pg_start_backup(const char *backupidstr, bool fast, char **labelfile)
 	PG_END_ENSURE_ERROR_CLEANUP(pg_start_backup_callback, (Datum) BoolGetDatum(exclusive));
 
 	/*
-	 * Mark that start phase has correctly finished for an exclusive backup.
-	 */
-	if (exclusive)
-	{
-		LWLockAcquire(WALInsertLock, LW_EXCLUSIVE);
-		XLogCtl->Insert.exclusiveBackupState = EXCLUSIVE_BACKUP_IN_PROGRESS;
-		LWLockRelease(WALInsertLock);
-	}
-
-	/*
 	 * We're done.  As a convenience, return the starting WAL location.
 	 */
 	return startpoint;
@@ -9894,8 +9828,8 @@ pg_start_backup_callback(int code, Datum arg)
 	LWLockAcquire(WALInsertLock, LW_EXCLUSIVE);
 	if (exclusive)
 	{
-		Assert(XLogCtl->Insert.exclusiveBackupState == EXCLUSIVE_BACKUP_STARTING);
-		XLogCtl->Insert.exclusiveBackupState = EXCLUSIVE_BACKUP_NONE;
+		Assert(XLogCtl->Insert.exclusiveBackup);
+		XLogCtl->Insert.exclusiveBackup = false;
 	}
 	else
 	{
@@ -9903,28 +9837,10 @@ pg_start_backup_callback(int code, Datum arg)
 		XLogCtl->Insert.nonExclusiveBackups--;
 	}
 
-	if (XLogCtl->Insert.exclusiveBackupState == EXCLUSIVE_BACKUP_NONE &&
+	if (!XLogCtl->Insert.exclusiveBackup &&
 		XLogCtl->Insert.nonExclusiveBackups == 0)
 	{
 		XLogCtl->Insert.forcePageWrites = false;
-	}
-	LWLockRelease(WALInsertLock);
-}
-
-/*
- * Error cleanup callback for pg_stop_backup
- */
-static void
-pg_stop_backup_callback(int code, Datum arg)
-{
-	bool		exclusive = DatumGetBool(arg);
-
-	/* Update backup status on failure */
-	LWLockAcquire(WALInsertLock, LW_EXCLUSIVE);
-	if (exclusive)
-	{
-		Assert(XLogCtl->Insert.exclusiveBackupState == EXCLUSIVE_BACKUP_STOPPING);
-		XLogCtl->Insert.exclusiveBackupState = EXCLUSIVE_BACKUP_IN_PROGRESS;
 	}
 	LWLockRelease(WALInsertLock);
 }
@@ -9987,85 +9903,12 @@ do_pg_stop_backup(char *labelfile, bool waitforarchive)
 			  errmsg("WAL level not sufficient for making an online backup"),
 				 errhint("wal_level must be set to \"archive\" or \"hot_standby\" at server start.")));
 
-	if (exclusive)
-	{
-		/*
-		 * At first, mark that we're now stopping an exclusive backup,
-		 * to ensure that there are no other sessions currently running
-		 * pg_start_backup() or pg_stop_backup().
-		 */
-		LWLockAcquire(WALInsertLock, LW_EXCLUSIVE);
-		if (XLogCtl->Insert.exclusiveBackupState != EXCLUSIVE_BACKUP_IN_PROGRESS)
-		{
-			LWLockRelease(WALInsertLock);
-			ereport(ERROR,
-					(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
-					 errmsg("exclusive backup not in progress")));
-		}
-		XLogCtl->Insert.exclusiveBackupState = EXCLUSIVE_BACKUP_STOPPING;
-		LWLockRelease(WALInsertLock);
-
-		/*
-		 * Remove backup_label. In case of failure, the state for an exclusive
-		 * backup is switched back to in-progress.
-		 */
-		PG_ENSURE_ERROR_CLEANUP(pg_stop_backup_callback, (Datum) BoolGetDatum(exclusive));
-		{
-			/*
-			 * Read the existing label file into memory.
-			 */
-			struct stat statbuf;
-			int			r;
-
-			if (stat(BACKUP_LABEL_FILE, &statbuf))
-			{
-				if (errno != ENOENT)
-					ereport(ERROR,
-							(errcode_for_file_access(),
-							 errmsg("could not stat file \"%s\": %m",
-									BACKUP_LABEL_FILE)));
-				ereport(ERROR,
-						(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
-						 errmsg("a backup is not in progress")));
-			}
-
-			lfp = AllocateFile(BACKUP_LABEL_FILE, "r");
-			if (!lfp)
-			{
-				ereport(ERROR,
-						(errcode_for_file_access(),
-						 errmsg("could not read file \"%s\": %m",
-								BACKUP_LABEL_FILE)));
-			}
-			labelfile = palloc(statbuf.st_size + 1);
-			r = fread(labelfile, statbuf.st_size, 1, lfp);
-			labelfile[statbuf.st_size] = '\0';
-
-			/*
-			 * Close and remove the backup label file
-			 */
-			if (r != 1 || ferror(lfp) || FreeFile(lfp))
-				ereport(ERROR,
-						(errcode_for_file_access(),
-						 errmsg("could not read file \"%s\": %m",
-								BACKUP_LABEL_FILE)));
-			if (unlink(BACKUP_LABEL_FILE) != 0)
-				ereport(ERROR,
-						(errcode_for_file_access(),
-						 errmsg("could not remove file \"%s\": %m",
-								BACKUP_LABEL_FILE)));
-		}
-		PG_END_ENSURE_ERROR_CLEANUP(pg_stop_backup_callback, (Datum) BoolGetDatum(exclusive));
-	}
-
 	/*
 	 * OK to update backup counters and forcePageWrites
 	 */
 	LWLockAcquire(WALInsertLock, LW_EXCLUSIVE);
 	if (exclusive)
-	{
-		XLogCtl->Insert.exclusiveBackupState = EXCLUSIVE_BACKUP_NONE;
-	}
+		XLogCtl->Insert.exclusiveBackup = false;
 	else
 	{
 		/*
@@ -10078,12 +9921,59 @@ do_pg_stop_backup(char *labelfile, bool waitforarchive)
 		XLogCtl->Insert.nonExclusiveBackups--;
 	}
 
-	if (XLogCtl->Insert.exclusiveBackupState == EXCLUSIVE_BACKUP_NONE &&
+	if (!XLogCtl->Insert.exclusiveBackup &&
 		XLogCtl->Insert.nonExclusiveBackups == 0)
 	{
 		XLogCtl->Insert.forcePageWrites = false;
 	}
 	LWLockRelease(WALInsertLock);
+
+	if (exclusive)
+	{
+		/*
+		 * Read the existing label file into memory.
+		 */
+		struct stat statbuf;
+		int			r;
+
+		if (stat(BACKUP_LABEL_FILE, &statbuf))
+		{
+			if (errno != ENOENT)
+				ereport(ERROR,
+						(errcode_for_file_access(),
+						 errmsg("could not stat file \"%s\": %m",
+								BACKUP_LABEL_FILE)));
+			ereport(ERROR,
+					(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+					 errmsg("a backup is not in progress")));
+		}
+
+		lfp = AllocateFile(BACKUP_LABEL_FILE, "r");
+		if (!lfp)
+		{
+			ereport(ERROR,
+					(errcode_for_file_access(),
+					 errmsg("could not read file \"%s\": %m",
+							BACKUP_LABEL_FILE)));
+		}
+		labelfile = palloc(statbuf.st_size + 1);
+		r = fread(labelfile, statbuf.st_size, 1, lfp);
+		labelfile[statbuf.st_size] = '\0';
+
+		/*
+		 * Close and remove the backup label file
+		 */
+		if (r != 1 || ferror(lfp) || FreeFile(lfp))
+			ereport(ERROR,
+					(errcode_for_file_access(),
+					 errmsg("could not read file \"%s\": %m",
+							BACKUP_LABEL_FILE)));
+		if (unlink(BACKUP_LABEL_FILE) != 0)
+			ereport(ERROR,
+					(errcode_for_file_access(),
+					 errmsg("could not remove file \"%s\": %m",
+							BACKUP_LABEL_FILE)));
+	}
 
 	/*
 	 * Read and parse the START WAL LOCATION line (this code is pretty crude,
@@ -10318,7 +10208,7 @@ do_pg_abort_backup(void)
 	Assert(XLogCtl->Insert.nonExclusiveBackups > 0);
 	XLogCtl->Insert.nonExclusiveBackups--;
 
-	if (XLogCtl->Insert.exclusiveBackupState == EXCLUSIVE_BACKUP_NONE &&
+	if (!XLogCtl->Insert.exclusiveBackup &&
 		XLogCtl->Insert.nonExclusiveBackups == 0)
 	{
 		XLogCtl->Insert.forcePageWrites = false;
@@ -10913,7 +10803,7 @@ retry:
 							readId, readSeg, readOff)));
 			goto next_record_is_invalid;
 		}
-		if (!ValidXLOGHeader((XLogPageHeader) readBuf, emode))
+		if (!ValidXLOGHeader((XLogPageHeader) readBuf, emode, true))
 			goto next_record_is_invalid;
 	}
 
@@ -10935,7 +10825,7 @@ retry:
 				readId, readSeg, readOff)));
 		goto next_record_is_invalid;
 	}
-	if (!ValidXLOGHeader((XLogPageHeader) readBuf, emode))
+	if (!ValidXLOGHeader((XLogPageHeader) readBuf, emode, false))
 		goto next_record_is_invalid;
 
 	Assert(targetId == readId);

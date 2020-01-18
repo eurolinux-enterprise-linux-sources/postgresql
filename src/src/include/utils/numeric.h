@@ -17,9 +17,8 @@
 #include "fmgr.h"
 
 /*
- * Limit on the precision (and hence scale) specifiable in a NUMERIC typmod.
- * Note that the implementation limit on the length of a numeric value is
- * much larger --- beware of what you use this for!
+ * Hardcoded precision limit - arbitrary, but must be small enough that
+ * dscale values will fit in 14 bits.
  */
 #define NUMERIC_MAX_PRECISION		1000
 

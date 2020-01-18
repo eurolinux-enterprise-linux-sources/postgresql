@@ -16,7 +16,6 @@
 
 #include <ctype.h>
 #include <fcntl.h>
-#include <limits.h>
 
 #include "libpq-fe.h"
 #include "libpq-int.h"
@@ -52,8 +51,7 @@ static bool static_std_strings = false;
 
 
 static PGEvent *dupEvents(PGEvent *events, int count);
-static bool pqAddTuple(PGresult *res, PGresAttValue *tup,
-		   const char **errmsgp);
+static bool pqAddTuple(PGresult *res, PGresAttValue *tup);
 static bool PQsendQueryStart(PGconn *conn);
 static int PQsendQueryGuts(PGconn *conn,
 				const char *command,
@@ -417,26 +415,18 @@ dupEvents(PGEvent *events, int count)
  * equal to PQntuples(res).  If it is equal, a new tuple is created and
  * added to the result.
  * Returns a non-zero value for success and zero for failure.
- * (On failure, we report the specific problem via pqInternalNotice.)
  */
 int
 PQsetvalue(PGresult *res, int tup_num, int field_num, char *value, int len)
 {
 	PGresAttValue *attval;
-	const char *errmsg = NULL;
 
-	/* Note that this check also protects us against null "res" */
 	if (!check_field_number(res, field_num))
 		return FALSE;
 
 	/* Invalid tup_num, must be <= ntups */
 	if (tup_num < 0 || tup_num > res->ntups)
-	{
-		pqInternalNotice(&res->noticeHooks,
-						 "row number %d is out of range 0..%d",
-						 tup_num, res->ntups);
 		return FALSE;
-	}
 
 	/* need to allocate a new tuple? */
 	if (tup_num == res->ntups)
@@ -449,7 +439,7 @@ PQsetvalue(PGresult *res, int tup_num, int field_num, char *value, int len)
 						  TRUE);
 
 		if (!tup)
-			goto fail;
+			return FALSE;
 
 		/* initialize each column to NULL */
 		for (i = 0; i < res->numAttributes; i++)
@@ -459,8 +449,8 @@ PQsetvalue(PGresult *res, int tup_num, int field_num, char *value, int len)
 		}
 
 		/* add it to the array */
-		if (!pqAddTuple(res, tup, &errmsg))
-			goto fail;
+		if (!pqAddTuple(res, tup))
+			return FALSE;
 	}
 
 	attval = &res->tuples[tup_num][field_num];
@@ -480,24 +470,13 @@ PQsetvalue(PGresult *res, int tup_num, int field_num, char *value, int len)
 	{
 		attval->value = (char *) pqResultAlloc(res, len + 1, TRUE);
 		if (!attval->value)
-			goto fail;
+			return FALSE;
 		attval->len = len;
 		memcpy(attval->value, value, len);
 		attval->value[len] = '\0';
 	}
 
 	return TRUE;
-
-	/*
-	 * Report failure via pqInternalNotice.  If preceding code didn't provide
-	 * an error message, assume "out of memory" was meant.
-	 */
-fail:
-	if (!errmsg)
-		errmsg = libpq_gettext("out of memory");
-	pqInternalNotice(&res->noticeHooks, "%s", errmsg);
-
-	return FALSE;
 }
 
 /*
@@ -866,13 +845,10 @@ pqInternalNotice(const PGNoticeHooks *hooks, const char *fmt,...)
 /*
  * pqAddTuple
  *	  add a row pointer to the PGresult structure, growing it if necessary
- *	  Returns TRUE if OK, FALSE if an error prevented adding the row
- *
- * On error, *errmsgp can be set to an error string to be returned.
- * If it is left NULL, the error is presumed to be "out of memory".
+ *	  Returns TRUE if OK, FALSE if not enough memory to add the row
  */
 static bool
-pqAddTuple(PGresult *res, PGresAttValue *tup, const char **errmsgp)
+pqAddTuple(PGresult *res, PGresAttValue *tup)
 {
 	if (res->ntups >= res->tupArrSize)
 	{
@@ -887,35 +863,8 @@ pqAddTuple(PGresult *res, PGresAttValue *tup, const char **errmsgp)
 		 * existing allocation. Note that the positions beyond res->ntups are
 		 * garbage, not necessarily NULL.
 		 */
-		int			newSize;
+		int			newSize = (res->tupArrSize > 0) ? res->tupArrSize * 2 : 128;
 		PGresAttValue **newTuples;
-
-		/*
-		 * Since we use integers for row numbers, we can't support more than
-		 * INT_MAX rows.  Make sure we allow that many, though.
-		 */
-		if (res->tupArrSize <= INT_MAX / 2)
-			newSize = (res->tupArrSize > 0) ? res->tupArrSize * 2 : 128;
-		else if (res->tupArrSize < INT_MAX)
-			newSize = INT_MAX;
-		else
-		{
-			*errmsgp = libpq_gettext("PGresult cannot support more than INT_MAX tuples");
-			return FALSE;
-		}
-
-		/*
-		 * Also, on 32-bit platforms we could, in theory, overflow size_t even
-		 * before newSize gets to INT_MAX.  (In practice we'd doubtless hit
-		 * OOM long before that, but let's check.)
-		 */
-#if INT_MAX >= (SIZE_MAX / 2)
-		if (newSize > SIZE_MAX / sizeof(PGresAttValue *))
-		{
-			*errmsgp = libpq_gettext("size_t overflow");
-			return FALSE;
-		}
-#endif
 
 		if (res->tuples == NULL)
 			newTuples = (PGresAttValue **)
@@ -1141,7 +1090,7 @@ pqRowProcessor(PGconn *conn, const char **errmsgp)
 	}
 
 	/* And add the tuple to the PGresult's tuple array */
-	if (!pqAddTuple(res, tup, errmsgp))
+	if (!pqAddTuple(res, tup))
 		goto fail;
 
 	/*
@@ -1413,7 +1362,8 @@ PQsendQueryStart(PGconn *conn)
 	}
 
 	/* initialize async result-accumulation state */
-	pqClearAsyncResult(conn);
+	conn->result = NULL;
+	conn->next_result = NULL;
 
 	/* reset single-row processing mode */
 	conn->singleRowMode = false;
@@ -2923,7 +2873,7 @@ PQoidStatus(const PGresult *res)
 
 	size_t		len;
 
-	if (!res || strncmp(res->cmdStatus, "INSERT ", 7) != 0)
+	if (!res || !res->cmdStatus || strncmp(res->cmdStatus, "INSERT ", 7) != 0)
 		return "";
 
 	len = strspn(res->cmdStatus + 7, "0123456789");
@@ -2947,6 +2897,7 @@ PQoidValue(const PGresult *res)
 	unsigned long result;
 
 	if (!res ||
+		!res->cmdStatus ||
 		strncmp(res->cmdStatus, "INSERT ", 7) != 0 ||
 		res->cmdStatus[7] < '0' ||
 		res->cmdStatus[7] > '9')

@@ -2762,7 +2762,7 @@ ORDER BY thousand;
         1 |     1001
 (2 rows)
 
-RESET enable_indexonlyscan;
+RESET enable_indexscan;
 --
 -- Check elimination of constant-NULL subexpressions
 --

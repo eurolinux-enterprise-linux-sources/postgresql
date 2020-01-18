@@ -151,7 +151,7 @@ $ENV{PATH}=$ENV{PATH} . ';c:\some\where\bison\bin';
       <productname>Microsoft Windows SDK</productname> it
       is recommended that you upgrade to the latest version (currently
       version 7.1), available for download from
-      <ulink url="https://www.microsoft.com/download"></>.
+      <ulink url="http://www.microsoft.com/downloads/"></>.
      </para>
      <para>
       You must always include the
@@ -170,8 +170,7 @@ $ENV{PATH}=$ENV{PATH} . ';c:\some\where\bison\bin';
       ActiveState Perl is required to run the build generation scripts. MinGW
       or Cygwin Perl will not work. It must also be present in the PATH.
       Binaries can be downloaded from
-      <ulink url="http://www.activestate.com"></>
-      (Note: version 5.8.3 or later is required,
+      <ulink url="http://www.activestate.com"></> (Note: version 5.8 or later is required,
       the free Standard Distribution is sufficient).
      </para></listitem>
     </varlistentry>

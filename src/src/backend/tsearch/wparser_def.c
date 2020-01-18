@@ -2419,7 +2419,7 @@ mark_hl_words(HeadlineParsedText *prs, TSQuery query, int highlight,
 						break;
 				}
 				if (curlen < min_words && i >= prs->curwords)
-				{				/* got end of text and our cover is shorter
+				{				/* got end of text and our cover is shoter
 								 * than min_words */
 					for (i = p - 1; i >= 0; i--)
 					{

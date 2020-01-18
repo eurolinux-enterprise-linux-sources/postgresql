@@ -33,7 +33,6 @@
 #include "catalog/pg_type.h"
 #include "miscadmin.h"
 #include "parser/parse_type.h"
-#include "parser/scansup.h"
 #include "utils/builtins.h"
 #include "utils/fmgroids.h"
 #include "utils/lsyscache.h"
@@ -1394,7 +1393,7 @@ parseNameAndArgTypes(const char *string, bool allowNone, List **names,
 	ptr2 = ptr + strlen(ptr);
 	while (--ptr2 > ptr)
 	{
-		if (!scanner_isspace(*ptr2))
+		if (!isspace((unsigned char) *ptr2))
 			break;
 	}
 	if (*ptr2 != ')')
@@ -1411,7 +1410,7 @@ parseNameAndArgTypes(const char *string, bool allowNone, List **names,
 	for (;;)
 	{
 		/* allow leading whitespace */
-		while (scanner_isspace(*ptr))
+		while (isspace((unsigned char) *ptr))
 			ptr++;
 		if (*ptr == '\0')
 		{
@@ -1467,7 +1466,7 @@ parseNameAndArgTypes(const char *string, bool allowNone, List **names,
 		/* Lop off trailing whitespace */
 		while (--ptr2 >= typename)
 		{
-			if (!scanner_isspace(*ptr2))
+			if (!isspace((unsigned char) *ptr2))
 				break;
 			*ptr2 = '\0';
 		}

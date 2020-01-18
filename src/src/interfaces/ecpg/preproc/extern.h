@@ -34,15 +34,15 @@ extern char *descriptor_index;
 extern char *descriptor_name;
 extern char *connection;
 extern char *input_filename;
-extern char *base_yytext,
+extern char *yytext,
 		   *token_start;
 
 #ifdef YYDEBUG
-extern int	base_yydebug;
+extern int	yydebug;
 #endif
-extern int	base_yylineno;
-extern FILE *base_yyin,
-		   *base_yyout;
+extern int	yylineno;
+extern FILE *yyin,
+		   *yyout;
 extern char *output_filename;
 
 extern struct _include_path *include_paths;

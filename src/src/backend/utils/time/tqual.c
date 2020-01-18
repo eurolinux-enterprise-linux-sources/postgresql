@@ -72,6 +72,8 @@ SnapshotData SnapshotSelfData = {HeapTupleSatisfiesSelf};
 SnapshotData SnapshotAnyData = {HeapTupleSatisfiesAny};
 SnapshotData SnapshotToastData = {HeapTupleSatisfiesToast};
 
+/* local functions */
+static bool XidInMVCCSnapshot(TransactionId xid, Snapshot snapshot);
 
 
 /*
@@ -1280,11 +1282,10 @@ HeapTupleIsSurelyDead(HeapTupleHeader tuple, TransactionId OldestXmin)
  *
  * Note: GetSnapshotData never stores either top xid or subxids of our own
  * backend into a snapshot, so these xids will not be reported as "running"
- * by this function.  This is OK for current uses, because we always check
- * TransactionIdIsCurrentTransactionId first, except when it's known the
- * XID could not be ours anyway.
+ * by this function.  This is OK for current uses, because we actually only
+ * apply this for known-committed XIDs.
  */
-bool
+static bool
 XidInMVCCSnapshot(TransactionId xid, Snapshot snapshot)
 {
 	uint32		i;

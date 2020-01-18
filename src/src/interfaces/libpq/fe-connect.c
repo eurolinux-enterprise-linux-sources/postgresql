@@ -100,25 +100,6 @@ static int ldapServiceLookup(const char *purl, PQconninfoOption *options,
 #define ERRCODE_CANNOT_CONNECT_NOW "57P03"
 
 /*
- * Cope with the various platform-specific ways to spell TCP keepalive socket
- * options.  This doesn't cover Windows, which as usual does its own thing.
- */
-#if defined(TCP_KEEPIDLE)
-/* TCP_KEEPIDLE is the name of this option on Linux and *BSD */
-#define PG_TCP_KEEPALIVE_IDLE TCP_KEEPIDLE
-#define PG_TCP_KEEPALIVE_IDLE_STR "TCP_KEEPIDLE"
-#elif defined(TCP_KEEPALIVE_THRESHOLD)
-/* TCP_KEEPALIVE_THRESHOLD is the name of this option on Solaris >= 11 */
-#define PG_TCP_KEEPALIVE_IDLE TCP_KEEPALIVE_THRESHOLD
-#define PG_TCP_KEEPALIVE_IDLE_STR "TCP_KEEPALIVE_THRESHOLD"
-#elif defined(TCP_KEEPALIVE) && defined(__darwin__)
-/* TCP_KEEPALIVE is the name of this option on macOS */
-/* Caution: Solaris has this symbol but it means something different */
-#define PG_TCP_KEEPALIVE_IDLE TCP_KEEPALIVE
-#define PG_TCP_KEEPALIVE_IDLE_STR "TCP_KEEPALIVE"
-#endif
-
-/*
  * fall back options if they are not specified by arguments or defined
  * by environment variables
  */
@@ -1211,18 +1192,31 @@ setKeepalivesIdle(PGconn *conn)
 	if (idle < 0)
 		idle = 0;
 
-#ifdef PG_TCP_KEEPALIVE_IDLE
-	if (setsockopt(conn->sock, IPPROTO_TCP, PG_TCP_KEEPALIVE_IDLE,
+#ifdef TCP_KEEPIDLE
+	if (setsockopt(conn->sock, IPPROTO_TCP, TCP_KEEPIDLE,
 				   (char *) &idle, sizeof(idle)) < 0)
 	{
 		char		sebuf[256];
 
 		appendPQExpBuffer(&conn->errorMessage,
-						  libpq_gettext("setsockopt(%s) failed: %s\n"),
-						  PG_TCP_KEEPALIVE_IDLE_STR,
+					  libpq_gettext("setsockopt(TCP_KEEPIDLE) failed: %s\n"),
 						  SOCK_STRERROR(SOCK_ERRNO, sebuf, sizeof(sebuf)));
 		return 0;
 	}
+#else
+#ifdef TCP_KEEPALIVE
+	/* Darwin uses TCP_KEEPALIVE rather than TCP_KEEPIDLE */
+	if (setsockopt(conn->sock, IPPROTO_TCP, TCP_KEEPALIVE,
+				   (char *) &idle, sizeof(idle)) < 0)
+	{
+		char		sebuf[256];
+
+		appendPQExpBuffer(&conn->errorMessage,
+					 libpq_gettext("setsockopt(TCP_KEEPALIVE) failed: %s\n"),
+						  SOCK_STRERROR(SOCK_ERRNO, sebuf, sizeof(sebuf)));
+		return 0;
+	}
+#endif
 #endif
 
 	return 1;
@@ -1250,8 +1244,7 @@ setKeepalivesInterval(PGconn *conn)
 		char		sebuf[256];
 
 		appendPQExpBuffer(&conn->errorMessage,
-						  libpq_gettext("setsockopt(%s) failed: %s\n"),
-						  "TCP_KEEPINTVL",
+					 libpq_gettext("setsockopt(TCP_KEEPINTVL) failed: %s\n"),
 						  SOCK_STRERROR(SOCK_ERRNO, sebuf, sizeof(sebuf)));
 		return 0;
 	}
@@ -1283,8 +1276,7 @@ setKeepalivesCount(PGconn *conn)
 		char		sebuf[256];
 
 		appendPQExpBuffer(&conn->errorMessage,
-						  libpq_gettext("setsockopt(%s) failed: %s\n"),
-						  "TCP_KEEPCNT",
+					   libpq_gettext("setsockopt(TCP_KEEPCNT) failed: %s\n"),
 						  SOCK_STRERROR(SOCK_ERRNO, sebuf, sizeof(sebuf)));
 		return 0;
 	}
@@ -1292,7 +1284,7 @@ setKeepalivesCount(PGconn *conn)
 
 	return 1;
 }
-#else							/* WIN32 */
+#else							/* Win32 */
 #ifdef SIO_KEEPALIVE_VALS
 /*
  * Enable keepalives and set the keepalive values on Win32,
@@ -1774,8 +1766,7 @@ keep_going:						/* We will come back to here until there is
 											(char *) &on, sizeof(on)) < 0)
 						{
 							appendPQExpBuffer(&conn->errorMessage,
-											  libpq_gettext("setsockopt(%s) failed: %s\n"),
-											  "SO_KEEPALIVE",
+											  libpq_gettext("setsockopt(SO_KEEPALIVE) failed: %s\n"),
 							SOCK_STRERROR(SOCK_ERRNO, sebuf, sizeof(sebuf)));
 							err = 1;
 						}
@@ -3908,16 +3899,6 @@ ldapServiceLookup(const char *purl, PQconninfoOption *options,
 
 #define MAXBUFSIZE 256
 
-/*
- * parseServiceInfo: if a service name has been given, look it up and absorb
- * connection options from it into *options.
- *
- * Returns 0 on success, nonzero on failure.  On failure, if errorMessage
- * isn't null, also store an error message there.  (Note: the only reason
- * this function and related ones don't dump core on errorMessage == NULL
- * is the undocumented fact that printfPQExpBuffer does nothing when passed
- * a null PQExpBuffer pointer.)
- */
 static int
 parseServiceInfo(PQconninfoOption *options, PQExpBuffer errorMessage)
 {
@@ -3936,14 +3917,9 @@ parseServiceInfo(PQconninfoOption *options, PQExpBuffer errorMessage)
 	if (service == NULL)
 		service = getenv("PGSERVICE");
 
-	/* If no service name given, nothing to do */
 	if (service == NULL)
 		return 0;
 
-	/*
-	 * Try PGSERVICEFILE if specified, else try ~/.pg_service.conf (if that
-	 * exists).
-	 */
 	if ((env = getenv("PGSERVICEFILE")) != NULL)
 		strlcpy(serviceFile, env, sizeof(serviceFile));
 	else
@@ -3951,9 +3927,13 @@ parseServiceInfo(PQconninfoOption *options, PQExpBuffer errorMessage)
 		char		homedir[MAXPGPATH];
 
 		if (!pqGetHomeDirectory(homedir, sizeof(homedir)))
-			goto next_file;
+		{
+			printfPQExpBuffer(errorMessage, libpq_gettext("could not get home directory to locate service definition file"));
+			return 1;
+		}
 		snprintf(serviceFile, MAXPGPATH, "%s/%s", homedir, ".pg_service.conf");
-		if (stat(serviceFile, &stat_buf) != 0)
+		errno = 0;
+		if (stat(serviceFile, &stat_buf) != 0 && errno == ENOENT)
 			goto next_file;
 	}
 
@@ -3969,7 +3949,8 @@ next_file:
 	 */
 	snprintf(serviceFile, MAXPGPATH, "%s/pg_service.conf",
 			 getenv("PGSYSCONFDIR") ? getenv("PGSYSCONFDIR") : SYSCONFDIR);
-	if (stat(serviceFile, &stat_buf) != 0)
+	errno = 0;
+	if (stat(serviceFile, &stat_buf) != 0 && errno == ENOENT)
 		goto last_file;
 
 	status = parseServiceFile(serviceFile, service, options, errorMessage, &group_found);
@@ -5717,26 +5698,18 @@ PasswordFromFile(char *hostname, char *port, char *dbname, char *username)
 			break;
 
 		len = strlen(buf);
-
-		/* Remove trailing newline */
-		if (len > 0 && buf[len - 1] == '\n')
-		{
-			buf[--len] = '\0';
-			/* Handle DOS-style line endings, too, even when not on Windows */
-			if (len > 0 && buf[len - 1] == '\r')
-				buf[--len] = '\0';
-		}
-
 		if (len == 0)
 			continue;
+
+		/* Remove trailing newline */
+		if (buf[len - 1] == '\n')
+			buf[len - 1] = 0;
 
 		if ((t = pwdfMatchesString(t, hostname)) == NULL ||
 			(t = pwdfMatchesString(t, port)) == NULL ||
 			(t = pwdfMatchesString(t, dbname)) == NULL ||
 			(t = pwdfMatchesString(t, username)) == NULL)
 			continue;
-
-		/* Found a match. */
 		ret = strdup(t);
 		fclose(fp);
 
@@ -5817,15 +5790,7 @@ dot_pg_pass_warning(PGconn *conn)
  *
  * This is essentially the same as get_home_path(), but we don't use that
  * because we don't want to pull path.c into libpq (it pollutes application
- * namespace).
- *
- * Returns true on success, false on failure to obtain the directory name.
- *
- * CAUTION: although in most situations failure is unexpected, there are users
- * who like to run applications in a home-directory-less environment.  On
- * failure, you almost certainly DO NOT want to report an error.  Just act as
- * though whatever file you were hoping to find in the home directory isn't
- * there (which it isn't).
+ * namespace)
  */
 bool
 pqGetHomeDirectory(char *buf, int bufsize)

@@ -32,7 +32,6 @@ _hash_doinsert(Relation rel, IndexTuple itup)
 	Buffer		metabuf;
 	HashMetaPage metap;
 	BlockNumber blkno;
-	Page		metapage;
 	Page		page;
 	HashPageOpaque pageopaque;
 	Size		itemsz;
@@ -58,8 +57,7 @@ _hash_doinsert(Relation rel, IndexTuple itup)
 
 	/* Read the metapage */
 	metabuf = _hash_getbuf(rel, HASH_METAPAGE, HASH_READ, LH_META_PAGE);
-	metapage = BufferGetPage(metabuf);
-	metap = HashPageGetMeta(metapage);
+	metap = HashPageGetMeta(BufferGetPage(metabuf));
 
 	/*
 	 * Check whether the item can fit on a hash page at all. (Eventually, we
@@ -68,12 +66,12 @@ _hash_doinsert(Relation rel, IndexTuple itup)
 	 *
 	 * XXX this is useless code if we are only storing hash keys.
 	 */
-	if (itemsz > HashMaxItemSize(metapage))
+	if (itemsz > HashMaxItemSize((Page) metap))
 		ereport(ERROR,
 				(errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
 				 errmsg("index row size %lu exceeds hash maximum %lu",
 						(unsigned long) itemsz,
-						(unsigned long) HashMaxItemSize(metapage)),
+						(unsigned long) HashMaxItemSize((Page) metap)),
 			errhint("Values larger than a buffer page cannot be indexed.")));
 
 	/*

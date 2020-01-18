@@ -1934,7 +1934,7 @@ StandbyRecoverPreparedTransactions(bool overwriteOK)
 				TransactionId subxid = subxids[i];
 
 				Assert(TransactionIdFollows(subxid, xid));
-				SubTransSetParent(subxid, xid, overwriteOK);
+				SubTransSetParent(xid, subxid, overwriteOK);
 			}
 		}
 	}

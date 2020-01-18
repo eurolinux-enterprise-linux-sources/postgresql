@@ -40,10 +40,13 @@ Datum
 xidout(PG_FUNCTION_ARGS)
 {
 	TransactionId transactionId = PG_GETARG_TRANSACTIONID(0);
-	char	   *result = (char *) palloc(16);
 
-	snprintf(result, 16, "%lu", (unsigned long) transactionId);
-	PG_RETURN_CSTRING(result);
+	/* maximum 32 bit unsigned integer representation takes 10 chars */
+	char	   *str = palloc(11);
+
+	snprintf(str, 11, "%lu", (unsigned long) transactionId);
+
+	PG_RETURN_CSTRING(str);
 }
 
 /*
@@ -129,9 +132,12 @@ xidComparator(const void *arg1, const void *arg2)
 Datum
 cidin(PG_FUNCTION_ARGS)
 {
-	char	   *str = PG_GETARG_CSTRING(0);
+	char	   *s = PG_GETARG_CSTRING(0);
+	CommandId	c;
 
-	PG_RETURN_COMMANDID((CommandId) strtoul(str, NULL, 0));
+	c = atoi(s);
+
+	PG_RETURN_COMMANDID(c);
 }
 
 /*
@@ -143,7 +149,7 @@ cidout(PG_FUNCTION_ARGS)
 	CommandId	c = PG_GETARG_COMMANDID(0);
 	char	   *result = (char *) palloc(16);
 
-	snprintf(result, 16, "%lu", (unsigned long) c);
+	snprintf(result, 16, "%u", (unsigned int) c);
 	PG_RETURN_CSTRING(result);
 }
 

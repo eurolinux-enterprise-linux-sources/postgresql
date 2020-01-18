@@ -1,8 +1,9 @@
 /*-------------------------------------------------------------------------
  *
  * win32env.c
- *	  putenv() and unsetenv() for win32, which update both process environment
- *	  and caches in (potentially multiple) C run-time library (CRT) versions.
+ *	  putenv() and unsetenv() for win32, that updates both process
+ *	  environment and the cached versions in (potentially multiple)
+ *	  MSVCRT.
  *
  * Portions Copyright (c) 1996-2012, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
@@ -23,10 +24,17 @@ pgwin32_putenv(const char *envval)
 	char	   *cp;
 
 	/*
-	 * Each CRT has its own _putenv() symbol and copy of the environment.
-	 * Update the environment in each CRT module currently loaded, so every
-	 * third-party library sees this change regardless of the CRT it links
-	 * against.
+	 * Each version of MSVCRT has its own _putenv() call in the runtime
+	 * library.
+	 *
+	 * mingw always uses MSVCRT.DLL, but if we are in a Visual C++
+	 * environment, attempt to update the environment in all MSVCRT modules
+	 * that are currently loaded, to work properly with any third party
+	 * libraries linked against a different MSVCRT but still relying on
+	 * environment variables.
+	 *
+	 * Also separately update the system environment that gets inherited by
+	 * subprocesses.
 	 */
 #ifdef _MSC_VER
 	typedef int (_cdecl * PUTENVPROC) (const char *);
@@ -38,49 +46,28 @@ pgwin32_putenv(const char *envval)
 	}			rtmodules[] =
 	{
 		{
-			"msvcrt", NULL, NULL
-		},						/* Visual Studio 6.0 / MinGW */
+			"msvcrt", 0, NULL
+		},						/* Visual Studio 6.0 / mingw */
 		{
-			"msvcrtd", NULL, NULL
-		},
-		{
-			"msvcr70", NULL, NULL
+			"msvcr70", 0, NULL
 		},						/* Visual Studio 2002 */
 		{
-			"msvcr70d", NULL, NULL
-		},
-		{
-			"msvcr71", NULL, NULL
+			"msvcr71", 0, NULL
 		},						/* Visual Studio 2003 */
 		{
-			"msvcr71d", NULL, NULL
-		},
-		{
-			"msvcr80", NULL, NULL
+			"msvcr80", 0, NULL
 		},						/* Visual Studio 2005 */
 		{
-			"msvcr80d", NULL, NULL
-		},
-		{
-			"msvcr90", NULL, NULL
+			"msvcr90", 0, NULL
 		},						/* Visual Studio 2008 */
 		{
-			"msvcr90d", NULL, NULL
-		},
-		{
-			"msvcr100", NULL, NULL
+			"msvcr100", 0, NULL
 		},						/* Visual Studio 2010 */
 		{
-			"msvcr100d", NULL, NULL
-		},
-		{
-			"msvcr110", NULL, NULL
+			"msvcr110", 0, NULL
 		},						/* Visual Studio 2012 */
 		{
-			"msvcr110d", NULL, NULL
-		},
-		{
-			NULL, NULL, NULL
+			NULL, 0, NULL
 		}
 	};
 	int			i;
@@ -89,7 +76,7 @@ pgwin32_putenv(const char *envval)
 	{
 		if (rtmodules[i].putenvFunc == NULL)
 		{
-			if (rtmodules[i].hmodule == NULL)
+			if (rtmodules[i].hmodule == 0)
 			{
 				/* Not attempted before, so try to find this DLL */
 				rtmodules[i].hmodule = GetModuleHandle(rtmodules[i].modulename);
@@ -107,6 +94,7 @@ pgwin32_putenv(const char *envval)
 					rtmodules[i].putenvFunc = (PUTENVPROC) GetProcAddress(rtmodules[i].hmodule, "_putenv");
 					if (rtmodules[i].putenvFunc == NULL)
 					{
+						CloseHandle(rtmodules[i].hmodule);
 						rtmodules[i].hmodule = INVALID_HANDLE_VALUE;
 						continue;
 					}
@@ -127,8 +115,8 @@ pgwin32_putenv(const char *envval)
 #endif   /* _MSC_VER */
 
 	/*
-	 * Update process environment, making this change visible to child
-	 * processes and to CRTs initializing in the future.
+	 * Update the process environment - to make modifications visible to child
+	 * processes.
 	 *
 	 * Need a copy of the string so we can modify it.
 	 */
@@ -148,7 +136,7 @@ pgwin32_putenv(const char *envval)
 		/*
 		 * Only call SetEnvironmentVariable() when we are adding a variable,
 		 * not when removing it. Calling it on both crashes on at least
-		 * certain versions of MinGW.
+		 * certain versions of MingW.
 		 */
 		if (!SetEnvironmentVariable(envcpy, cp))
 		{

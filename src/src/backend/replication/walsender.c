@@ -109,10 +109,12 @@ static StringInfoData reply_message;
 static TimestampTz last_reply_timestamp;
 
 /* Flags set by signal handlers for later service in main loop */
+static volatile sig_atomic_t got_SIGHUP = false;
 volatile sig_atomic_t walsender_shutdown_requested = false;
 volatile sig_atomic_t walsender_ready_to_stop = false;
 
 /* Signal handlers */
+static void WalSndSigHupHandler(SIGNAL_ARGS);
 static void WalSndShutdownHandler(SIGNAL_ARGS);
 static void WalSndQuickDieHandler(SIGNAL_ARGS);
 static void WalSndXLogSendHandler(SIGNAL_ARGS);
@@ -235,11 +237,10 @@ WalSndHandshake(void)
 		 * Check for any other interesting events that happened while we
 		 * slept.
 		 */
-		if (ConfigReloadPending)
+		if (got_SIGHUP)
 		{
-			ConfigReloadPending = false;
+			got_SIGHUP = false;
 			ProcessConfigFile(PGC_SIGHUP);
-			SyncRepInitConfig();
 		}
 
 		/* Handle the very limited subset of commands expected in this phase */
@@ -744,9 +745,9 @@ WalSndLoop(void)
 			exit(1);
 
 		/* Process any requests or signals received recently */
-		if (ConfigReloadPending)
+		if (got_SIGHUP)
 		{
-			ConfigReloadPending = false;
+			got_SIGHUP = false;
 			ProcessConfigFile(PGC_SIGHUP);
 			SyncRepInitConfig();
 		}
@@ -1301,6 +1302,19 @@ WalSndRqstFileReload(void)
 	}
 }
 
+/* SIGHUP: set flag to re-read config file at next convenient time */
+static void
+WalSndSigHupHandler(SIGNAL_ARGS)
+{
+	int			save_errno = errno;
+
+	got_SIGHUP = true;
+	if (MyWalSnd)
+		SetLatch(&MyWalSnd->latch);
+
+	errno = save_errno;
+}
+
 /* SIGTERM: set flag to shut down */
 static void
 WalSndShutdownHandler(SIGNAL_ARGS)
@@ -1382,7 +1396,7 @@ void
 WalSndSignals(void)
 {
 	/* Set up signal handlers */
-	pqsignal(SIGHUP, PostgresSigHupHandler);	/* set flag to read config
+	pqsignal(SIGHUP, WalSndSigHupHandler);		/* set flag to read config
 												 * file */
 	pqsignal(SIGINT, SIG_IGN);	/* not used */
 	pqsignal(SIGTERM, WalSndShutdownHandler);	/* request shutdown */

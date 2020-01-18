@@ -1886,7 +1886,7 @@ setup_formatted_log_time(void)
 {
 	struct timeval tv;
 	pg_time_t	stamp_time;
-	char		msbuf[13];
+	char		msbuf[8];
 
 	gettimeofday(&tv, NULL);
 	stamp_time = (pg_time_t) tv.tv_sec;

@@ -165,7 +165,6 @@ su - postgres
       <application>PL/Perl</application> you need a full
       <productname>Perl</productname> installation, including the
       <filename>libperl</filename> library and the header files.
-      The minimum required version is <productname>Perl</productname> 5.8.3.
       Since <application>PL/Perl</application> will be a shared
       library, the <indexterm><primary>libperl</primary></indexterm>
       <filename>libperl</filename> library must be a shared library
@@ -319,7 +318,7 @@ su - postgres
        <primary>perl</primary>
       </indexterm>
 
-      <application>Perl</> 5.8.3 or later is needed to build from a Git checkout,
+      <application>Perl</> 5.8 or later is needed to build from a Git checkout,
       or if you changed the input files for any of the build steps that
       use Perl scripts.  If building on Windows you will need
       <application>Perl</> in any case.
@@ -353,18 +352,16 @@ su - postgres
   <title>Getting The Source</title>
 
   <para>
-   The <productname>PostgreSQL</> &version; sources can be obtained from the
-   download section of our
-   website: <ulink url="https://www.postgresql.org/download/"></ulink>.  You
-   should get a file named <filename>postgresql-&version;.tar.gz</filename>
-   or <filename>postgresql-&version;.tar.bz2</filename>. After
-   you have obtained the file, unpack it:
+   The <productname>PostgreSQL</> &version; sources can be obtained by
+   anonymous FTP from <ulink
+   url="ftp://ftp.postgresql.org/pub/source/v&version;/postgresql-&version;.tar.gz"></ulink>.
+   Other download options can be found on our website:
+   <ulink url="http://www.postgresql.org/download/"></ulink>. After you
+   have obtained the file, unpack it:
 <screen>
 <userinput>gunzip postgresql-&version;.tar.gz</userinput>
 <userinput>tar xf postgresql-&version;.tar</userinput>
 </screen>
-   (Use <command>bunzip2</command> instead of <command>gunzip</command> if you
-   have the <filename>.bz2</filename> file.)
    This will create a directory
    <filename>postgresql-&version;</filename> under the current directory
    with the <productname>PostgreSQL</> sources.
@@ -1370,7 +1367,7 @@ su - postgres
        <term><envar>PERL</envar></term>
        <listitem>
         <para>
-         Full path name of the Perl interpreter.  This will be used to
+         Full path to the Perl interpreter.  This will be used to
          determine the dependencies for building PL/Perl.
         </para>
        </listitem>
@@ -1380,7 +1377,7 @@ su - postgres
        <term><envar>PYTHON</envar></term>
        <listitem>
         <para>
-         Full path name of the Python interpreter.  This will be used to
+         Full path to the Python interpreter.  This will be used to
          determine the dependencies for building PL/Python.  Also,
          whether Python 2 or 3 is specified here (or otherwise
          implicitly chosen) determines which variant of the PL/Python
@@ -1397,7 +1394,7 @@ su - postgres
        <term><envar>TCLSH</envar></term>
        <listitem>
         <para>
-         Full path name of the Tcl interpreter.  This will be used to
+         Full path to the Tcl interpreter.  This will be used to
          determine the dependencies for building PL/Tcl, and it will
          be substituted into Tcl scripts.
         </para>
@@ -1414,26 +1411,6 @@ su - postgres
        </listitem>
       </varlistentry>
      </variablelist>
-    </para>
-
-    <para>
-     Sometimes it is useful to add compiler flags after-the-fact to the set
-     that were chosen by <filename>configure</>.  An important example is
-     that <application>gcc</>'s <option>-Werror</> option cannot be included
-     in the <envar>CFLAGS</envar> passed to <filename>configure</>, because
-     it will break many of <filename>configure</>'s built-in tests.  To add
-     such flags, include them in the <envar>COPT</envar> environment variable
-     while running <filename>gmake</>.  The contents of <envar>COPT</envar>
-     are added to both the <envar>CFLAGS</envar> and <envar>LDFLAGS</envar>
-     options set up by <filename>configure</>.  For example, you could do
-<screen>
-<userinput>gmake COPT='-Werror'</>
-</screen>
-     or
-<screen>
-<userinput>export COPT='-Werror'</>
-<userinput>gmake</>
-</screen>
     </para>
 
     <note>
@@ -1456,14 +1433,6 @@ su - postgres
       <option>-O0</>.  An easy way to do this is by passing an option
       to <application>make</>: <command>gmake PROFILE=-O0 file.o</>.
      </para>
-
-     <para>
-      The <envar>COPT</> and <envar>PROFILE</> environment variables are
-      actually handled identically by the <productname>PostgreSQL</>
-      makefiles.  Which to use is a matter of preference, but a common habit
-      among developers is to use <envar>PROFILE</> for one-time flag
-      adjustments, while <envar>COPT</> might be kept set all the time.
-     </para>
     </note>
    </step>
 
@@ -1479,7 +1448,7 @@ su - postgres
     will take a few minutes depending on your
     hardware. The last line displayed should be:
 <screen>
-All of PostgreSQL successfully made. Ready to install.
+All of PostgreSQL is successfully made. Ready to install.
 </screen>
    </para>
 
@@ -1492,7 +1461,7 @@ All of PostgreSQL successfully made. Ready to install.
 </screen>
    The last line displayed should be:
 <screen>
-PostgreSQL, contrib, and documentation successfully made. Ready to install.
+PostgreSQL, contrib and HTML documentation successfully made. Ready to install.
 </screen>
    </para>
   </step>
@@ -1960,7 +1929,7 @@ kill `cat /usr/local/pgsql/data/postmaster.pid`
    it has recently been verified to build and pass its regression tests
    on that platform.  Currently, most testing of platform compatibility
    is done automatically by test machines in the
-   <ulink url="https://buildfarm.postgresql.org/">PostgreSQL Build Farm</ulink>.
+   <ulink url="http://buildfarm.postgresql.org/">PostgreSQL Build Farm</ulink>.
    If you are interested in using <productname>PostgreSQL</> on a platform
    that is not represented in the build farm, but on which the code works
    or can be made to work, you are strongly encouraged to set up a build
@@ -2136,7 +2105,7 @@ kill `cat /usr/local/pgsql/data/postmaster.pid`
      should take care of it.
     </para>
 
-    <!-- https://archives.postgresql.org/message-id/6064jt6cfm.fsf_-_@dba2.int.libertyrms.com -->
+    <!-- http://archives.postgresql.org/message-id/6064jt6cfm.fsf_-_@dba2.int.libertyrms.com -->
 
     <para>
      One user reports:
@@ -2198,7 +2167,7 @@ hosts=local4,bind4
 
    <sect3>
     <title>Memory Management</title>
-    <!-- https://archives.postgresql.org/message-id/603bgqmpl9.fsf@dba2.int.libertyrms.com -->
+    <!-- http://archives.postgresql.org/message-id/603bgqmpl9.fsf@dba2.int.libertyrms.com -->
 
     <para>
      AIX can be somewhat peculiar with regards to the way it does

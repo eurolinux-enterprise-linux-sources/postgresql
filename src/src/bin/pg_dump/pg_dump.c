@@ -97,10 +97,7 @@ const char *lockWaitTimeout;
 /* subquery used to convert user ID (eg, datdba) to user name */
 static const char *username_subquery;
 
-/*
- * For 8.0 and earlier servers, pulled from pg_database, for 8.1+ we use
- * FirstNormalObjectId - 1.
- */
+/* obsolete as of 7.3: */
 static Oid	g_last_builtin_oid; /* value of the last builtin oid */
 
 /*
@@ -660,24 +657,17 @@ main(int argc, char **argv)
 	else
 		username_subquery = "SELECT usename FROM pg_user WHERE usesysid =";
 
-	/*
-	 * Find the last built-in OID, if needed (prior to 8.1)
-	 *
-	 * With 8.1 and above, we can just use FirstNormalObjectId - 1.
-	 */
-	if (fout->remoteVersion < 80100)
+	/* Find the last built-in OID, if needed */
+	if (fout->remoteVersion < 70300)
 	{
 		if (fout->remoteVersion >= 70100)
 			g_last_builtin_oid = findLastBuiltinOid_V71(fout,
 												  PQdb(GetConnection(fout)));
 		else
 			g_last_builtin_oid = findLastBuiltinOid_V70(fout);
+		if (g_verbose)
+			write_msg(NULL, "last built-in OID is %u\n", g_last_builtin_oid);
 	}
-	else
-		g_last_builtin_oid = FirstNormalObjectId - 1;
-
-	if (g_verbose)
-		write_msg(NULL, "last built-in OID is %u\n", g_last_builtin_oid);
 
 	/* Expand schema selection patterns into OID lists */
 	if (schema_include_patterns.head != NULL)
@@ -730,15 +720,7 @@ main(int argc, char **argv)
 			getTableDataFKConstraints();
 	}
 
-	/*
-	 * In binary-upgrade mode, we do not have to worry about the actual blob
-	 * data or the associated metadata that resides in the pg_largeobject and
-	 * pg_largeobject_metadata tables, respectivly.
-	 *
-	 * However, we do need to collect blob information as there may be
-	 * comments or other information on blobs that we do need to dump out.
-	 */
-	if (outputBlobs || binary_upgrade)
+	if (outputBlobs)
 		getBlobs(fout);
 
 	/*
@@ -807,7 +789,6 @@ main(int argc, char **argv)
 	ropt->noTablespace = outputNoTablespaces;
 	ropt->disable_triggers = disable_triggers;
 	ropt->use_setsessauth = use_setsessauth;
-	ropt->binary_upgrade = binary_upgrade;
 
 	if (compressLevel == -1)
 		ropt->compression = 0;
@@ -1294,7 +1275,7 @@ selectDumpableCast(CastInfo *cast)
 	if (checkExtensionMembership(&cast->dobj))
 		return;					/* extension membership overrides all else */
 
-	if (cast->dobj.catId.oid <= (Oid) g_last_builtin_oid)
+	if (cast->dobj.catId.oid < (Oid) FirstNormalObjectId)
 		cast->dobj.dump = false;
 	else
 		cast->dobj.dump = include_everything;
@@ -1314,7 +1295,7 @@ selectDumpableProcLang(ProcLangInfo *plang)
 	if (checkExtensionMembership(&plang->dobj))
 		return;					/* extension membership overrides all else */
 
-	if (plang->dobj.catId.oid <= (Oid) g_last_builtin_oid)
+	if (plang->dobj.catId.oid < (Oid) FirstNormalObjectId)
 		plang->dobj.dump = false;
 	else
 		plang->dobj.dump = include_everything;
@@ -1333,7 +1314,7 @@ selectDumpableProcLang(ProcLangInfo *plang)
 static void
 selectDumpableExtension(ExtensionInfo *extinfo)
 {
-	if (binary_upgrade && extinfo->dobj.catId.oid <= (Oid) g_last_builtin_oid)
+	if (binary_upgrade && extinfo->dobj.catId.oid < (Oid) FirstNormalObjectId)
 		extinfo->dobj.dump = false;
 	else
 		extinfo->dobj.dump = include_everything;
@@ -2432,14 +2413,8 @@ dumpBlob(Archive *fout, BlobInfo *binfo)
 				 NULL, binfo->rolname,
 				 binfo->dobj.catId, 0, binfo->dobj.dumpId);
 
-	/*
-	 * Dump ACL if any
-	 *
-	 * Do not dump the ACL in binary-upgrade mode, however, as the ACL will be
-	 * copied over by pg_upgrade as it is part of the pg_largeobject_metadata
-	 * table.
-	 */
-	if (binfo->blobacl && !binary_upgrade)
+	/* Dump ACL if any */
+	if (binfo->blobacl)
 		dumpACL(fout, binfo->dobj.catId, binfo->dobj.dumpId, "LARGE OBJECT",
 				binfo->dobj.name, NULL, cquery->data,
 				NULL, binfo->rolname, binfo->blobacl);
@@ -2463,13 +2438,6 @@ dumpBlobs(Archive *fout, void *arg)
 	int			ntups;
 	int			i;
 	int			cnt;
-
-	/*
-	 * Do not dump out blob data in binary-upgrade mode, pg_upgrade will copy
-	 * the pg_largeobject table over entirely from the old cluster.
-	 */
-	if (binary_upgrade)
-		return 1;
 
 	if (g_verbose)
 		write_msg(NULL, "saving large objects\n");
@@ -3863,24 +3831,19 @@ getFuncs(Archive *fout, int *numFuncs)
 	selectSourceSchema(fout, "pg_catalog");
 
 	/*
-	 * Find all interesting functions.  This is a bit complicated:
+	 * Find all user-defined functions.  Normally we can exclude functions in
+	 * pg_catalog, which is worth doing since there are several thousand of
+	 * 'em.  However, there are some extensions that create functions in
+	 * pg_catalog.  In normal dumps we can still ignore those --- but in
+	 * binary-upgrade mode, we must dump the member objects of the extension,
+	 * so be sure to fetch any such functions.
 	 *
-	 * 1. Always exclude aggregates; those are handled elsewhere.
-	 *
-	 * 2. Always exclude functions that are internally dependent on something
-	 * else, since presumably those will be created as a result of creating
-	 * the something else.  This currently acts only to suppress constructor
-	 * functions for range types (so we only need it in 9.2 and up).  Note
-	 * this is OK only because the constructors don't have any dependencies
-	 * the range type doesn't have; otherwise we might not get creation
-	 * ordering correct.
-	 *
-	 * 3. Otherwise, we normally exclude functions in pg_catalog.  However, if
-	 * they're members of extensions and we are in binary-upgrade mode then
-	 * include them, since we want to dump extension members individually in
-	 * that mode.  Also, if they are used by casts then we need to gather the
-	 * information about them, though they won't be dumped if they are
-	 * built-in.
+	 * Also, in 9.2 and up, exclude functions that are internally dependent on
+	 * something else, since presumably those will be created as a result of
+	 * creating the something else.  This currently only acts to suppress
+	 * constructor functions for range types.  Note that this is OK only
+	 * because the constructors don't have any dependencies the range type
+	 * doesn't have; otherwise we might not get creation ordering correct.
 	 */
 
 	if (fout->remoteVersion >= 70300)
@@ -3891,22 +3854,16 @@ getFuncs(Archive *fout, int *numFuncs)
 						  "pronamespace, "
 						  "(%s proowner) AS rolname "
 						  "FROM pg_proc p "
-						  "WHERE NOT proisagg",
+						  "WHERE NOT proisagg AND ("
+						  "pronamespace != "
+						  "(SELECT oid FROM pg_namespace "
+						  "WHERE nspname = 'pg_catalog')",
 						  username_subquery);
 		if (fout->remoteVersion >= 90200)
 			appendPQExpBuffer(query,
 							  "\n  AND NOT EXISTS (SELECT 1 FROM pg_depend "
 							  "WHERE classid = 'pg_proc'::regclass AND "
 							  "objid = p.oid AND deptype = 'i')");
-		appendPQExpBuffer(query,
-						  "\n  AND ("
-						  "\n  pronamespace != "
-						  "(SELECT oid FROM pg_namespace "
-						  "WHERE nspname = 'pg_catalog')"
-						  "\n  OR EXISTS (SELECT 1 FROM pg_cast"
-						  "\n  WHERE pg_cast.oid > '%u'::oid "
-						  "\n  AND p.oid = pg_cast.castfunc)",
-						  g_last_builtin_oid);
 		if (binary_upgrade && fout->remoteVersion >= 90100)
 			appendPQExpBuffer(query,
 							  "\n  OR EXISTS(SELECT 1 FROM pg_depend WHERE "
@@ -7023,8 +6980,7 @@ dumpComment(Archive *fout, const char *target,
 	}
 	else
 	{
-		/* We do dump blob comments in binary-upgrade mode */
-		if (schemaOnly && !binary_upgrade)
+		if (schemaOnly)
 			return;
 	}
 
@@ -7552,8 +7508,8 @@ dumpExtension(Archive *fout, ExtensionInfo *extinfo)
 		/*
 		 *	We unconditionally create the extension, so we must drop it if it
 		 *	exists.  This could happen if the user deleted 'plpgsql' and then
-		 *	readded it, causing its oid to be greater than g_last_builtin_oid.
-		 *	The g_last_builtin_oid test was kept to avoid repeatedly dropping
+		 *	readded it, causing its oid to be greater than FirstNormalObjectId.
+		 *	The FirstNormalObjectId test was kept to avoid repeatedly dropping
 		 *	and recreating extensions like 'plpgsql'.
 		 */
 		appendPQExpBuffer(q, "DROP EXTENSION IF EXISTS %s;\n", qextname);
@@ -9042,10 +8998,10 @@ dumpProcLang(Archive *fout, ProcLangInfo *plang)
 
 	/* Dump Proc Lang Comments and Security Labels */
 	dumpComment(fout, labelq->data,
-				lanschema, plang->lanowner,
+				NULL, "",
 				plang->dobj.catId, 0, plang->dobj.dumpId);
 	dumpSecLabel(fout, labelq->data,
-				 lanschema, plang->lanowner,
+				 NULL, "",
 				 plang->dobj.catId, 0, plang->dobj.dumpId);
 
 	if (plang->lanpltrusted)
@@ -9680,8 +9636,7 @@ dumpCast(Archive *fout, CastInfo *cast)
 	{
 		funcInfo = findFuncByOid(cast->castfunc);
 		if (funcInfo == NULL)
-			exit_horribly(NULL, "could not find function definition for function with OID %u\n",
-						  cast->castfunc);
+			return;
 	}
 
 	/*
@@ -9754,7 +9709,7 @@ dumpCast(Archive *fout, CastInfo *cast)
 
 	/* Dump Cast Comments */
 	dumpComment(fout, labelq->data,
-				"pg_catalog", "",
+				NULL, "",
 				cast->dobj.catId, 0, cast->dobj.dumpId);
 
 	destroyPQExpBuffer(defqry);
@@ -10237,8 +10192,7 @@ dumpOpclass(Archive *fout, OpclassInfo *opcinfo)
 	i_opcfamilynsp = PQfnumber(res, "opcfamilynsp");
 	i_amname = PQfnumber(res, "amname");
 
-	/* opcintype may still be needed after we PQclear res */
-	opcintype = pg_strdup(PQgetvalue(res, 0, i_opcintype));
+	opcintype = PQgetvalue(res, 0, i_opcintype);
 	opckeytype = PQgetvalue(res, 0, i_opckeytype);
 	opcdefault = PQgetvalue(res, 0, i_opcdefault);
 	/* opcfamily will still be needed after we PQclear res */
@@ -10472,15 +10426,6 @@ dumpOpclass(Archive *fout, OpclassInfo *opcinfo)
 
 	PQclear(res);
 
-	/*
-	 * If needComma is still false it means we haven't added anything after
-	 * the AS keyword.  To avoid printing broken SQL, append a dummy STORAGE
-	 * clause with the same datatype.  This isn't sanctioned by the
-	 * documentation, but actually DefineOpClass will treat it as a no-op.
-	 */
-	if (!needComma)
-		appendPQExpBuffer(q, "STORAGE %s", opcintype);
-
 	appendPQExpBuffer(q, ";\n");
 
 	appendPQExpBuffer(labelq, "OPERATOR CLASS %s",
@@ -10503,11 +10448,9 @@ dumpOpclass(Archive *fout, OpclassInfo *opcinfo)
 
 	/* Dump Operator Class Comments */
 	dumpComment(fout, labelq->data,
-				opcinfo->dobj.namespace->dobj.name, opcinfo->rolname,
+				NULL, opcinfo->rolname,
 				opcinfo->dobj.catId, 0, opcinfo->dobj.dumpId);
 
-	free(opcintype);
-	free(opcfamily);
 	free(amname);
 	destroyPQExpBuffer(query);
 	destroyPQExpBuffer(q);
@@ -10775,7 +10718,7 @@ dumpOpfamily(Archive *fout, OpfamilyInfo *opfinfo)
 
 	/* Dump Operator Family Comments */
 	dumpComment(fout, labelq->data,
-				opfinfo->dobj.namespace->dobj.name, opfinfo->rolname,
+				NULL, opfinfo->rolname,
 				opfinfo->dobj.catId, 0, opfinfo->dobj.dumpId);
 
 	free(amname);
@@ -11298,7 +11241,7 @@ dumpTSParser(Archive *fout, TSParserInfo *prsinfo)
 
 	/* Dump Parser Comments */
 	dumpComment(fout, labelq->data,
-				prsinfo->dobj.namespace->dobj.name, "",
+				NULL, "",
 				prsinfo->dobj.catId, 0, prsinfo->dobj.dumpId);
 
 	destroyPQExpBuffer(q);
@@ -11385,7 +11328,7 @@ dumpTSDictionary(Archive *fout, TSDictInfo *dictinfo)
 
 	/* Dump Dictionary Comments */
 	dumpComment(fout, labelq->data,
-				dictinfo->dobj.namespace->dobj.name, dictinfo->rolname,
+				NULL, dictinfo->rolname,
 				dictinfo->dobj.catId, 0, dictinfo->dobj.dumpId);
 
 	destroyPQExpBuffer(q);
@@ -11451,7 +11394,7 @@ dumpTSTemplate(Archive *fout, TSTemplateInfo *tmplinfo)
 
 	/* Dump Template Comments */
 	dumpComment(fout, labelq->data,
-				tmplinfo->dobj.namespace->dobj.name, "",
+				NULL, "",
 				tmplinfo->dobj.catId, 0, tmplinfo->dobj.dumpId);
 
 	destroyPQExpBuffer(q);
@@ -11579,7 +11522,7 @@ dumpTSConfig(Archive *fout, TSConfigInfo *cfginfo)
 
 	/* Dump Configuration Comments */
 	dumpComment(fout, labelq->data,
-				cfginfo->dobj.namespace->dobj.name, cfginfo->rolname,
+				NULL, cfginfo->rolname,
 				cfginfo->dobj.catId, 0, cfginfo->dobj.dumpId);
 
 	destroyPQExpBuffer(q);
@@ -12020,8 +11963,7 @@ dumpSecLabel(Archive *fout, const char *target,
 	}
 	else
 	{
-		/* We do dump blob security labels in binary-upgrade mode */
-		if (schemaOnly && !binary_upgrade)
+		if (schemaOnly)
 			return;
 	}
 
@@ -13383,10 +13325,10 @@ dumpTableConstraintComment(Archive *fout, ConstraintInfo *coninfo)
 }
 
 /*
- * findLastBuiltinOid -
+ * findLastBuiltInOid -
  * find the last built in oid
  *
- * For 7.1 through 8.0, we do this by retrieving datlastsysoid from the
+ * For 7.1 and 7.2, we do this by retrieving datlastsysoid from the
  * pg_database entry for the current database
  */
 static Oid
@@ -13408,7 +13350,7 @@ findLastBuiltinOid_V71(Archive *fout, const char *dbname)
 }
 
 /*
- * findLastBuiltinOid -
+ * findLastBuiltInOid -
  * find the last built in oid
  *
  * For 7.0, we do this by assuming that the last thing that initdb does is to

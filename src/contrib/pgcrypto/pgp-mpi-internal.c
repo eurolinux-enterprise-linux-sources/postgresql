@@ -140,7 +140,7 @@ bn_to_mpi(mpz_t *bn)
 }
 
 /*
- * Decide the number of bits in the random component k
+ * Decide the number of bits in the random componont k
  *
  * It should be in the same range as p for signing (which
  * is deprecated), but can be much smaller for encrypting.
@@ -148,8 +148,8 @@ bn_to_mpi(mpz_t *bn)
  * Until I research it further, I just mimic gpg behaviour.
  * It has a special mapping table, for values <= 5120,
  * above that it uses 'arbitrary high number'.  Following
- * algorithm hovers 10-70 bits above gpg values.  And for
- * larger p, it uses gpg's algorithm.
+ * algorihm hovers 10-70 bits above gpg values.  And for
+ * larger p, it uses gpg's algorihm.
  *
  * The point is - if k gets large, encryption will be
  * really slow.  It does not matter for decryption.

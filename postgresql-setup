@@ -2,38 +2,6 @@
 #
 # postgresql-setup - Initialization and upgrade operations for PostgreSQL
 
-# For SELinux we need to use 'runuser' not 'su'
-if [ -x /sbin/runuser ]; then
-    SU=runuser
-else
-    SU=su
-fi
-
-if test "$(id -u)" -eq 0; then
-    cmd=
-    for v in PGSETUP_DEBUG PGSETUP_INITDB_OPTIONS PGSETUP_PGUPGRADE_OPTIONS; do
-        eval var_content=\$$v
-        test -z "$var_content" && continue
-        cmd+=$v="$(printf %q "$var_content") "
-    done
-    cmd+=$(printf %q "$(readlink -f "$0")")
-    for arg; do cmd+=" $(printf %q "$arg")" ; done
-    # Drop root privileges asap.  It's not recommended to run postgresql-setup
-    # script under root nowadays; so we take the liberty to switch to the
-    # PostgreSQL admin user (by default 'postgres') without any other option.
-    exec $SU -s /bin/sh postgres -c "$cmd"
-fi
-
-die () { echo >&2 "$*"; exit 1; }
-
-test "$(id -u)" -eq 0 && exit 1
-
-# ensure privacy
-umask 0077
-
-: ${RESTORECON=/sbin/restorecon}
-test -x $RESTORECON || RESTORECON=:
-
 test x"$PGSETUP_DEBUG" != x && set -x
 
 # PGVERSION is the full package version, e.g., 9.0.2
@@ -51,8 +19,6 @@ PREVMAJORVERSION=xxxx
 
 # PREVPGENGINE is the directory containing the previous postmaster executable
 PREVPGENGINE=xxxx
-
-USER=postgres
 
 # Absorb configuration settings from the specified systemd service file,
 # or the default "postgresql" service if not specified
@@ -133,40 +99,46 @@ PGUPLOG=/var/lib/pgsql/pgupgrade.log
 export PGDATA
 export PGPORT
 
-script_result=0
+# For SELinux we need to use 'runuser' not 'su'
+if [ -x /sbin/runuser ]; then
+    SU=runuser
+else
+    SU=su
+fi
 
-test -w /var/lib/pgsql || {
-    echo >&2 $"The /var/lib/pgsql directory has wrong permissions."
-    echo >&2 $"Please make sure the directory is writable by postgres."
-    exit 1
-}
+SU_L_POSTGRES="$SU -s /bin/sh -l postgres"
+
+script_result=0
 
 # code shared between initdb and upgrade actions
 perform_initdb(){
     if [ ! -e "$PGDATA" ]; then
         mkdir "$PGDATA" || return 1
+        chown postgres:postgres "$PGDATA"
+        chmod go-rwx "$PGDATA"
     fi
-    $RESTORECON "$PGDATA"
-    test -w "$PGDATA" || die "$PGDATA is not writeable by $USER"
+    # Clean up SELinux tagging for PGDATA
+    [ -x /sbin/restorecon ] && /sbin/restorecon "$PGDATA"
 
     # Create the initdb log file if needed
-    if [ ! -e "$PGLOG" ]; then
+    if [ ! -e "$PGLOG" -a ! -h "$PGLOG" ]; then
         touch "$PGLOG" || return 1
+        chown postgres:postgres "$PGLOG"
+        chmod go-rwx "$PGLOG"
+        [ -x /sbin/restorecon ] && /sbin/restorecon "$PGLOG"
     fi
-    $RESTORECON "$PGLOG"
-    test -w "$PGLOG" || echo "$PGLOG is not writeable by $USER"
 
     # Initialize the database
-    initdbcmd=(
-        "$PGENGINE/initdb" --pgdata="$PGDATA"
-                           --auth=ident
-    )
-    eval "initdbcmd+=( $PGSETUP_INITDB_OPTIONS )"
+    initdbcmd="$PGENGINE/initdb --pgdata='$PGDATA' --auth='ident'"
+    initdbcmd+=" $PGSETUP_INITDB_OPTIONS"
 
-    "${initdbcmd[@]}" >> "$PGLOG" 2>&1 < /dev/null
+    $SU_L_POSTGRES -c "$initdbcmd" >> "$PGLOG" 2>&1 < /dev/null
 
+    # Create directory for postmaster log files
     mkdir "$PGDATA/pg_log"
-    $RESTORECON "$PGDATA/pg_log"
+    chown postgres:postgres "$PGDATA/pg_log"
+    chmod go-rwx "$PGDATA/pg_log"
+    [ -x /sbin/restorecon ] && /sbin/restorecon "$PGDATA/pg_log"
 
     if [ -f "$PGDATA/PG_VERSION" ]; then
         return 0
@@ -212,7 +184,9 @@ upgrade(){
     # Set up log file for pg_upgrade
     rm -f "$PGUPLOG"
     touch "$PGUPLOG" || exit 1
-    $RESTORECON "$PGUPLOG"
+    chown postgres:postgres "$PGUPLOG"
+    chmod go-rwx "$PGUPLOG"
+    [ -x /sbin/restorecon ] && /sbin/restorecon "$PGUPLOG"
 
     # Move old DB to PGDATAOLD
     PGDATAOLD="${PGDATA}-old"
@@ -237,22 +211,17 @@ upgrade(){
 
     # Create empty new-format database
     if perform_initdb; then
-        eval "add_options=( $PGSETUP_PGUPGRADE_OPTIONS )"
         # Do the upgrade
-        ( cd # pg_upgrade writes to $PWD
-        "$PGENGINE/pg_upgrade" \
-                --old-bindir="$PREVPGENGINE" \
-                --new-bindir="$PGENGINE" \
-                --old-datadir="$PGDATAOLD" \
-                --new-datadir="$PGDATA" \
-                --link \
-                --old-port="$PGPORT" \
-                --new-port="$PGPORT" \
-                --user=postgres \
-                "${add_options[@]}" \
-        >> "$PGUPLOG" 2>&1 < /dev/null
-        )
-
+        $SU_L_POSTGRES -c "$PGENGINE/pg_upgrade \
+                        '--old-bindir=$PREVPGENGINE' \
+                        '--new-bindir=$PGENGINE' \
+                        '--old-datadir=$PGDATAOLD' \
+                        '--new-datadir=$PGDATA' \
+                        --link \
+                        '--old-port=$PGPORT' '--new-port=$PGPORT' \
+                        --user=postgres \
+                        $PGSETUP_PGUPGRADE_OPTIONS" \
+                                >> "$PGUPLOG" 2>&1 < /dev/null
         if [ $? -ne 0 ]; then
             # pg_upgrade failed
             script_result=1

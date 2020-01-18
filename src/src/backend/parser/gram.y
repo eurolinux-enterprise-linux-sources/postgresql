@@ -1012,12 +1012,12 @@ AlterUserStmt:
 
 
 AlterUserSetStmt:
-			ALTER USER RoleId opt_in_database SetResetClause
+			ALTER USER RoleId SetResetClause
 				{
 					AlterRoleSetStmt *n = makeNode(AlterRoleSetStmt);
 					n->role = $3;
-					n->database = $4;
-					n->setstmt = $5;
+					n->database = NULL;
+					n->setstmt = $4;
 					$$ = (Node *)n;
 				}
 			;
@@ -3212,7 +3212,6 @@ opt_by:		BY				{}
 
 NumericOnly:
 			FCONST								{ $$ = makeFloat($1); }
-			| '+' FCONST						{ $$ = makeFloat($2); }
 			| '-' FCONST
 				{
 					$$ = makeFloat($2);
@@ -13375,3 +13374,13 @@ parser_init(base_yy_extra_type *yyext)
 {
 	yyext->parsetree = NIL;		/* in case grammar forgets to set it */
 }
+
+/*
+ * Must undefine this stuff before including scan.c, since it has different
+ * definitions for these macros.
+ */
+#undef yyerror
+#undef yylval
+#undef yylloc
+
+#include "scan.c"

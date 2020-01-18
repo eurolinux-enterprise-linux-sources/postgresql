@@ -228,9 +228,6 @@ static void get_rule_expr(Node *node, deparse_context *context,
 			  bool showimplicit);
 static void get_rule_expr_toplevel(Node *node, deparse_context *context,
 					   bool showimplicit);
-static void get_rule_expr_funccall(Node *node, deparse_context *context,
-					   bool showimplicit);
-static bool looks_like_function(Node *node);
 static void get_oper_expr(OpExpr *expr, deparse_context *context);
 static void get_func_expr(FuncExpr *expr, deparse_context *context,
 			  bool showimplicit);
@@ -761,7 +758,7 @@ pg_get_triggerdef_worker(Oid trigid, bool pretty)
  *
  * Note that the SQL-function versions of this omit any info about the
  * index tablespace; this is intentional because pg_dump wants it that way.
- * However pg_get_indexdef_string() includes the index tablespace.
+ * However pg_get_indexdef_string() includes index tablespace if not default.
  * ----------
  */
 Datum
@@ -790,11 +787,7 @@ pg_get_indexdef_ext(PG_FUNCTION_ARGS)
 														   prettyFlags)));
 }
 
-/*
- * Internal version for use by ALTER TABLE.
- * Includes a tablespace clause in the result.
- * Returns a palloc'd C string; no pretty-printing.
- */
+/* Internal version that returns a palloc'd C string */
 char *
 pg_get_indexdef_string(Oid indexrelid)
 {
@@ -1043,19 +1036,20 @@ pg_get_indexdef_worker(Oid indexrelid, int colno,
 		}
 
 		/*
-		 * Print tablespace, but only if requested
+		 * If it's in a nondefault tablespace, say so, but only if requested
 		 */
 		if (showTblSpc)
 		{
 			Oid			tblspc;
 
 			tblspc = get_rel_tablespace(indexrelid);
-			if (!OidIsValid(tblspc))
-				tblspc = MyDatabaseTableSpace;
-			if (isConstraint)
-				appendStringInfoString(&buf, " USING INDEX");
-			appendStringInfo(&buf, " TABLESPACE %s",
-							 quote_identifier(get_tablespace_name(tblspc)));
+			if (OidIsValid(tblspc))
+			{
+				if (isConstraint)
+					appendStringInfoString(&buf, " USING INDEX");
+				appendStringInfo(&buf, " TABLESPACE %s",
+							  quote_identifier(get_tablespace_name(tblspc)));
+			}
 		}
 
 		/*
@@ -2402,8 +2396,6 @@ make_ruledef(StringInfo buf, HeapTuple ruletup, TupleDesc rulettc,
 	char	   *ev_qual;
 	char	   *ev_action;
 	List	   *actions = NIL;
-	Relation	ev_relation;
-	TupleDesc	viewResultDesc = NULL;
 	int			fno;
 	Datum		dat;
 	bool		isnull;
@@ -2445,8 +2437,6 @@ make_ruledef(StringInfo buf, HeapTuple ruletup, TupleDesc rulettc,
 	if (ev_action != NULL)
 		actions = (List *) stringToNode(ev_action);
 
-	ev_relation = heap_open(ev_class, AccessShareLock);
-
 	/*
 	 * Build the rules definition text
 	 */
@@ -2463,7 +2453,6 @@ make_ruledef(StringInfo buf, HeapTuple ruletup, TupleDesc rulettc,
 	{
 		case '1':
 			appendStringInfo(buf, "SELECT");
-			viewResultDesc = RelationGetDescr(ev_relation);
 			break;
 
 		case '2':
@@ -2558,7 +2547,7 @@ make_ruledef(StringInfo buf, HeapTuple ruletup, TupleDesc rulettc,
 		foreach(action, actions)
 		{
 			query = (Query *) lfirst(action);
-			get_query_def(query, buf, NIL, viewResultDesc,
+			get_query_def(query, buf, NIL, NULL,
 						  prettyFlags, WRAP_COLUMN_DEFAULT, 0);
 			if (prettyFlags)
 				appendStringInfo(buf, ";\n");
@@ -2576,12 +2565,10 @@ make_ruledef(StringInfo buf, HeapTuple ruletup, TupleDesc rulettc,
 		Query	   *query;
 
 		query = (Query *) linitial(actions);
-		get_query_def(query, buf, NIL, viewResultDesc,
+		get_query_def(query, buf, NIL, NULL,
 					  prettyFlags, WRAP_COLUMN_DEFAULT, 0);
 		appendStringInfo(buf, ";");
 	}
-
-	heap_close(ev_relation, AccessShareLock);
 }
 
 
@@ -6069,63 +6056,6 @@ get_rule_expr_toplevel(Node *node, deparse_context *context,
 		get_rule_expr(node, context, showimplicit);
 }
 
-/*
- * get_rule_expr_funccall		- Parse back a function-call expression
- *
- * Same as get_rule_expr(), except that we guarantee that the output will
- * look like a function call, or like one of the things the grammar treats as
- * equivalent to a function call (see the func_expr_windowless production).
- * This is needed in places where the grammar uses func_expr_windowless and
- * you can't substitute a parenthesized a_expr.  If what we have isn't going
- * to look like a function call, wrap it in a dummy CAST() expression, which
- * will satisfy the grammar --- and, indeed, is likely what the user wrote to
- * produce such a thing.
- */
-static void
-get_rule_expr_funccall(Node *node, deparse_context *context,
-					   bool showimplicit)
-{
-	if (looks_like_function(node))
-		get_rule_expr(node, context, showimplicit);
-	else
-	{
-		StringInfo	buf = context->buf;
-
-		appendStringInfoString(buf, "CAST(");
-		/* no point in showing any top-level implicit cast */
-		get_rule_expr(node, context, false);
-		appendStringInfo(buf, " AS %s)",
-						 format_type_with_typemod(exprType(node),
-												  exprTypmod(node)));
-	}
-}
-
-/*
- * Helper function to identify node types that satisfy func_expr_windowless.
- * If in doubt, "false" is always a safe answer.
- */
-static bool
-looks_like_function(Node *node)
-{
-	if (node == NULL)
-		return false;			/* probably shouldn't happen */
-	switch (nodeTag(node))
-	{
-		case T_FuncExpr:
-			/* OK, unless it's going to deparse as a cast */
-			return (((FuncExpr *) node)->funcformat == COERCE_EXPLICIT_CALL);
-		case T_NullIfExpr:
-		case T_CoalesceExpr:
-		case T_MinMaxExpr:
-		case T_XmlExpr:
-			/* these are all accepted by func_expr_common_subexpr */
-			return true;
-		default:
-			break;
-	}
-	return false;
-}
-
 
 /*
  * get_oper_expr			- Parse back an OpExpr node
@@ -6859,7 +6789,7 @@ get_from_clause_item(Node *jtnode, Query *query, deparse_context *context)
 				break;
 			case RTE_FUNCTION:
 				/* Function RTE */
-				get_rule_expr_funccall(rte->funcexpr, context, true);
+				get_rule_expr(rte->funcexpr, context, true);
 				break;
 			case RTE_VALUES:
 				/* Values list RTE */
@@ -7214,17 +7144,12 @@ get_opclass_name(Oid opclass, Oid actual_datatype,
  * We strip any top-level FieldStore or assignment ArrayRef nodes that
  * appear in the input, and return the subexpression that's to be assigned.
  * If printit is true, we also print out the appropriate decoration for the
- * base column name (that the caller just printed).  We might also need to
- * strip CoerceToDomain nodes, but only ones that appear above assignment
- * nodes.
- *
- * Returns the subexpression that's to be assigned.
+ * base column name (that the caller just printed).
  */
 static Node *
 processIndirection(Node *node, deparse_context *context, bool printit)
 {
 	StringInfo	buf = context->buf;
-	CoerceToDomain *cdomain = NULL;
 
 	for (;;)
 	{
@@ -7274,27 +7199,9 @@ processIndirection(Node *node, deparse_context *context, bool printit)
 			 */
 			node = (Node *) aref->refassgnexpr;
 		}
-		else if (IsA(node, CoerceToDomain))
-		{
-			cdomain = (CoerceToDomain *) node;
-			/* If it's an explicit domain coercion, we're done */
-			if (cdomain->coercionformat != COERCE_IMPLICIT_CAST)
-				break;
-			/* Tentatively descend past the CoerceToDomain */
-			node = (Node *) cdomain->arg;
-		}
 		else
 			break;
 	}
-
-	/*
-	 * If we descended past a CoerceToDomain whose argument turned out not to
-	 * be a FieldStore or array assignment, back up to the CoerceToDomain.
-	 * (This is not enough to be fully correct if there are nested implicit
-	 * CoerceToDomains, but such cases shouldn't ever occur.)
-	 */
-	if (cdomain && node == (Node *) cdomain->arg)
-		node = (Node *) cdomain;
 
 	return node;
 }

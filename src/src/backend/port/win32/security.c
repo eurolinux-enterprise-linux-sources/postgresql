@@ -188,8 +188,7 @@ pgwin32_is_service(void)
 	_is_service = 0;
 	for (x = 0; x < Groups->GroupCount; x++)
 	{
-		if (EqualSid(ServiceSid, Groups->Groups[x].Sid) &&
-			(Groups->Groups[x].Attributes & SE_GROUP_ENABLED))
+		if (EqualSid(ServiceSid, Groups->Groups[x].Sid))
 		{
 			_is_service = 1;
 			break;

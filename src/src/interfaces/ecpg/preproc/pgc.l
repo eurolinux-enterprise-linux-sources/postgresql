@@ -1,4 +1,4 @@
-%top{
+%{
 /*-------------------------------------------------------------------------
  *
  * pgc.l
@@ -23,11 +23,8 @@
 #include <limits.h>
 
 #include "extern.h"
-#include "preproc.h"
-}
 
-%{
-extern YYSTYPE base_yylval;
+extern YYSTYPE yylval;
 
 static int		xcdepth = 0;	/* depth of nesting in slash-star comments */
 static char	   *dolqstart = NULL;	/* current $foo$ quote start string */
@@ -88,7 +85,6 @@ static struct _if_value
 %option noinput
 %option noyywrap
 %option warn
-%option prefix="base_yy"
 
 %option yylineno
 
@@ -418,7 +414,7 @@ cppline			{space}*#([^i][A-Za-z]*|{if}|{ifdef}|{ifndef}|{import})(.*\\{space})*.
 					BEGIN(SQL);
 					if (literalbuf[strspn(literalbuf, "01") + 1] != '\0')
 						mmerror(PARSE_ERROR, ET_ERROR, "invalid bit string literal");
-					base_yylval.str = mm_strdup(literalbuf);
+					yylval.str = mm_strdup(literalbuf);
 					return BCONST;
 				}
 
@@ -438,7 +434,7 @@ cppline			{space}*#([^i][A-Za-z]*|{if}|{ifdef}|{ifndef}|{import})(.*\\{space})*.
 <xh>{quotefail}	{
 				yyless(1);
 				BEGIN(SQL);
-				base_yylval.str = mm_strdup(literalbuf);
+				yylval.str = mm_strdup(literalbuf);
 				return XCONST;
 			}
 
@@ -481,27 +477,27 @@ cppline			{space}*#([^i][A-Za-z]*|{if}|{ifdef}|{ifndef}|{import})(.*\\{space})*.
 <xq,xqc>{quotefail} {
 				yyless(1);
 				BEGIN(state_before);
-				base_yylval.str = mm_strdup(literalbuf);
+				yylval.str = mm_strdup(literalbuf);
 				return SCONST;
 			}
 <xe>{quotestop} |
 <xe>{quotefail} {
 				yyless(1);
 				BEGIN(state_before);
-				base_yylval.str = mm_strdup(literalbuf);
+				yylval.str = mm_strdup(literalbuf);
 				return ECONST;
 			}
 <xn>{quotestop} |
 <xn>{quotefail} {
 				yyless(1);
 				BEGIN(state_before);
-				base_yylval.str = mm_strdup(literalbuf);
+				yylval.str = mm_strdup(literalbuf);
 				return NCONST;
 			}
 <xus>{xusstop} {
 				addlit(yytext, yyleng);
 				BEGIN(state_before);
-				base_yylval.str = mm_strdup(literalbuf);
+				yylval.str = mm_strdup(literalbuf);
 				return UCONST;
 			}
 <xq,xe,xn,xus>{xqdouble}	{ addlitchar('\''); }
@@ -541,9 +537,8 @@ cppline			{space}*#([^i][A-Za-z]*|{if}|{ifdef}|{ifndef}|{import})(.*\\{space})*.
 				{
 					addlit(yytext, yyleng);
 					free(dolqstart);
-					dolqstart = NULL;
 					BEGIN(SQL);
-					base_yylval.str = mm_strdup(literalbuf);
+					yylval.str = mm_strdup(literalbuf);
 					return DOLCONST;
 				}
 				else
@@ -580,12 +575,12 @@ cppline			{space}*#([^i][A-Za-z]*|{if}|{ifdef}|{ifndef}|{import})(.*\\{space})*.
 						if (literallen == 0)
 							mmerror(PARSE_ERROR, ET_ERROR, "zero-length delimited identifier");
 						/* The backend will truncate the identifier here. We do not as it does not change the result. */
-						base_yylval.str = mm_strdup(literalbuf);
+						yylval.str = mm_strdup(literalbuf);
 						return CSTRING;
 					}
 <xdc>{xdstop}		{
 						BEGIN(state_before);
-						base_yylval.str = mm_strdup(literalbuf);
+						yylval.str = mm_strdup(literalbuf);
 						return CSTRING;
 					}
 <xui>{xuistop}		{
@@ -594,7 +589,7 @@ cppline			{space}*#([^i][A-Za-z]*|{if}|{ifdef}|{ifndef}|{import})(.*\\{space})*.
 							mmerror(PARSE_ERROR, ET_ERROR, "zero-length delimited identifier");
 						/* The backend will truncate the identifier here. We do not as it does not change the result. */
 						addlit(yytext, yyleng);
-						base_yylval.str = mm_strdup(literalbuf);
+						yylval.str = mm_strdup(literalbuf);
 						return UIDENT;
 					}
 <xd,xui>{xddouble}		{ addlitchar('"'); }
@@ -690,13 +685,13 @@ cppline			{space}*#([^i][A-Za-z]*|{if}|{ifdef}|{ifndef}|{import})(.*\\{space})*.
 
 						/* Convert "!=" operator to "<>" for compatibility */
 						if (strcmp(yytext, "!=") == 0)
-							base_yylval.str = mm_strdup("<>");
+							yylval.str = mm_strdup("<>");
 						else
-							base_yylval.str = mm_strdup(yytext);
+							yylval.str = mm_strdup(yytext);
 						return Op;
 					}
 <SQL>{param}		{
-						base_yylval.ival = atol(yytext+1);
+						yylval.ival = atol(yytext+1);
 						return PARAM;
 					}
 <C,SQL>{integer}	{
@@ -713,36 +708,36 @@ cppline			{space}*#([^i][A-Za-z]*|{if}|{ifdef}|{ifndef}|{import})(.*\\{space})*.
 							)
 						{
 							errno = 0;
-							base_yylval.str = mm_strdup(yytext);
+							yylval.str = mm_strdup(yytext);
 							return FCONST;
 						}
-						base_yylval.ival = val;
+						yylval.ival = val;
 						return ICONST;
 					}
 <SQL>{ip}			{
-						base_yylval.str = mm_strdup(yytext);
+						yylval.str = mm_strdup(yytext);
 						return IP;
 				}
 <C,SQL>{decimal}	{
-						base_yylval.str = mm_strdup(yytext);
+						yylval.str = mm_strdup(yytext);
 						return FCONST;
 			}
 <C,SQL>{real}		{
-						base_yylval.str = mm_strdup(yytext);
+						yylval.str = mm_strdup(yytext);
 						return FCONST;
 			}
 <SQL>{realfail1}	{
 						yyless(yyleng-1);
-						base_yylval.str = mm_strdup(yytext);
+						yylval.str = mm_strdup(yytext);
 						return FCONST;
 					}
 <SQL>{realfail2}	{
 						yyless(yyleng-2);
-						base_yylval.str = mm_strdup(yytext);
+						yylval.str = mm_strdup(yytext);
 						return FCONST;
 					}
 <SQL>:{identifier}((("->"|\.){identifier})|(\[{array}\]))*	{
-						base_yylval.str = mm_strdup(yytext+1);
+						yylval.str = mm_strdup(yytext+1);
 						return(CVARIABLE);
 					}
 <SQL>{identifier}	{
@@ -768,7 +763,7 @@ cppline			{space}*#([^i][A-Za-z]*|{if}|{ifdef}|{ifndef}|{import})(.*\\{space})*.
 							 * to do so; that's just another way that ecpg could get
 							 * out of step with the backend.
 							 */
-							base_yylval.str = mm_strdup(yytext);
+							yylval.str = mm_strdup(yytext);
 							return IDENT;
 						}
 					}
@@ -789,11 +784,11 @@ cppline			{space}*#([^i][A-Za-z]*|{if}|{ifdef}|{ifndef}|{import})(.*\\{space})*.
 						char* endptr;
 
 						errno = 0;
-						base_yylval.ival = strtoul((char *)yytext,&endptr,16);
+						yylval.ival = strtoul((char *)yytext,&endptr,16);
 						if (*endptr != '\0' || errno == ERANGE)
 						{
 							errno = 0;
-							base_yylval.str = mm_strdup(yytext);
+							yylval.str = mm_strdup(yytext);
 							return SCONST;
 						}
 						return ICONST;
@@ -806,7 +801,7 @@ cppline			{space}*#([^i][A-Za-z]*|{if}|{ifdef}|{ifndef}|{import})(.*\\{space})*.
 						}
 						else
 						{
-							base_yylval.str = mm_strdup(yytext);
+							yylval.str = mm_strdup(yytext);
 							return(CPP_LINE);
 						}
 					}
@@ -818,12 +813,12 @@ cppline			{space}*#([^i][A-Za-z]*|{if}|{ifdef}|{ifndef}|{import})(.*\\{space})*.
 						}
 						else
 						{
-							base_yylval.str = mm_strdup(yytext);
+							yylval.str = mm_strdup(yytext);
 							return(CPP_LINE);
 						}
 					}
 <C,SQL>{cppline}	{
-						base_yylval.str = mm_strdup(yytext);
+						yylval.str = mm_strdup(yytext);
 						return(CPP_LINE);
 					}
 <C>{identifier}		{
@@ -848,7 +843,7 @@ cppline			{space}*#([^i][A-Za-z]*|{if}|{ifdef}|{ifndef}|{import})(.*\\{space})*.
 								return keyword->value;
 							else
 							{
-								base_yylval.str = mm_strdup(yytext);
+								yylval.str = mm_strdup(yytext);
 								return IDENT;
 							}
 						}

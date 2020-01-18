@@ -8,7 +8,7 @@
 
 !IF "$(BCB)" == ""
 !MESSAGE You must edit bcc32.mak and define BCB at the top
-!ERROR missing BCB
+!ERROR misssing BCB
 !ENDIF
 
 !IF "$(__NMAKE__)" == ""

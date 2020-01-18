@@ -286,20 +286,14 @@ libpqrcv_PQexec(const char *query)
 			 */
 			if (!libpq_select(-1))
 				continue;		/* interrupted */
-
-			/* Consume whatever data is available from the socket */
 			if (PQconsumeInput(streamConn) == 0)
-			{
-				/* trouble; drop whatever we had and return NULL */
-				PQclear(lastResult);
-				return NULL;
-			}
+				return NULL;	/* trouble */
 		}
 
 		/*
-		 * Emulate PQexec()'s behavior of returning the last result when there
-		 * are many.  Since walsender will never generate multiple results, we
-		 * skip the concatenation of error messages.
+		 * Emulate the PQexec()'s behavior of returning the last result when
+		 * there are many. Since walsender will never generate multiple
+		 * results, we skip the concatenation of error messages.
 		 */
 		result = PQgetResult(streamConn);
 		if (result == NULL)

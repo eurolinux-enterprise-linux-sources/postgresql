@@ -132,14 +132,7 @@ int			max_safe_fds = 32;	/* default if not changed */
 
 #define FileIsNotOpen(file) (VfdCache[file].fd == VFD_CLOSED)
 
-/*
- * Note: a VFD's seekPos is normally always valid, but if for some reason
- * an lseek() fails, it might become set to FileUnknownPos.  We can struggle
- * along without knowing the seek position in many cases, but in some places
- * we have to fail if we don't have it.
- */
 #define FileUnknownPos ((off_t) -1)
-#define FilePosIsUnknown(pos) ((pos) < 0)
 
 /* these are the assigned bits in fdstate below: */
 #define FD_TEMPORARY		(1 << 0)	/* T = delete when closed */
@@ -153,7 +146,7 @@ typedef struct vfd
 	File		nextFree;		/* link to next free VFD, if in freelist */
 	File		lruMoreRecently;	/* doubly linked recency-of-use list */
 	File		lruLessRecently;
-	off_t		seekPos;		/* current logical file position, or -1 */
+	off_t		seekPos;		/* current logical file position */
 	off_t		fileSize;		/* current size of file (0 if not temporary) */
 	char	   *fileName;		/* name of file, or NULL for unused VFD */
 	/* NB: fileName is malloc'd, and must be free'd when closing the VFD */
@@ -806,33 +799,19 @@ LruDelete(File file)
 
 	vfdP = &VfdCache[file];
 
-	/*
-	 * Normally we should know the seek position, but if for some reason we
-	 * have lost track of it, try again to get it.  If we still can't get it,
-	 * we have a problem: we will be unable to restore the file seek position
-	 * when and if the file is re-opened.  But we can't really throw an error
-	 * and refuse to close the file, or activities such as transaction cleanup
-	 * will be broken.
-	 */
-	if (FilePosIsUnknown(vfdP->seekPos))
-	{
-		vfdP->seekPos = lseek(vfdP->fd, (off_t) 0, SEEK_CUR);
-		if (FilePosIsUnknown(vfdP->seekPos))
-			elog(LOG, "could not seek file \"%s\" before closing: %m",
-				 vfdP->fileName);
-	}
-
-	/*
-	 * Close the file.  We aren't expecting this to fail; if it does, better
-	 * to leak the FD than to mess up our internal state.
-	 */
-	if (close(vfdP->fd))
-		elog(LOG, "could not close file \"%s\": %m", vfdP->fileName);
-	vfdP->fd = VFD_CLOSED;
-	--nfile;
-
 	/* delete the vfd record from the LRU ring */
 	Delete(file);
+
+	/* save the seek position */
+	vfdP->seekPos = lseek(vfdP->fd, (off_t) 0, SEEK_CUR);
+	Assert(vfdP->seekPos != (off_t) -1);
+
+	/* close the file */
+	if (close(vfdP->fd))
+		elog(ERROR, "could not close file \"%s\": %m", vfdP->fileName);
+
+	--nfile;
+	vfdP->fd = VFD_CLOSED;
 }
 
 static void
@@ -883,39 +862,22 @@ LruInsert(File file)
 								 vfdP->fileMode);
 		if (vfdP->fd < 0)
 		{
-			DO_DB(elog(LOG, "re-open failed: %m"));
+			DO_DB(elog(LOG, "RE_OPEN FAILED: %d", errno));
 			return -1;
 		}
 		else
 		{
+			DO_DB(elog(LOG, "RE_OPEN SUCCESS"));
 			++nfile;
 		}
 
-		/*
-		 * Seek to the right position.  We need no special case for seekPos
-		 * equal to FileUnknownPos, as lseek() will certainly reject that
-		 * (thus completing the logic noted in LruDelete() that we will fail
-		 * to re-open a file if we couldn't get its seek position before
-		 * closing).
-		 */
+		/* seek to the right position */
 		if (vfdP->seekPos != (off_t) 0)
 		{
-			if (lseek(vfdP->fd, vfdP->seekPos, SEEK_SET) < 0)
-			{
-				/*
-				 * If we fail to restore the seek position, treat it like an
-				 * open() failure.
-				 */
-				int			save_errno = errno;
+			off_t returnValue PG_USED_FOR_ASSERTS_ONLY;
 
-				elog(LOG, "could not seek file \"%s\" after re-opening: %m",
-					 vfdP->fileName);
-				(void) close(vfdP->fd);
-				vfdP->fd = VFD_CLOSED;
-				--nfile;
-				errno = save_errno;
-				return -1;
-			}
+			returnValue = lseek(vfdP->fd, vfdP->seekPos, SEEK_SET);
+			Assert(returnValue != (off_t) -1);
 		}
 	}
 
@@ -1298,15 +1260,15 @@ FileClose(File file)
 
 	if (!FileIsNotOpen(file))
 	{
+		/* remove the file from the lru ring */
+		Delete(file);
+
 		/* close the file */
 		if (close(vfdP->fd))
-			elog(LOG, "could not close file \"%s\": %m", vfdP->fileName);
+			elog(ERROR, "could not close file \"%s\": %m", vfdP->fileName);
 
 		--nfile;
 		vfdP->fd = VFD_CLOSED;
-
-		/* remove the file from the lru ring */
-		Delete(file);
 	}
 
 	/*
@@ -1411,7 +1373,6 @@ int
 FileRead(File file, char *buffer, int amount)
 {
 	int			returnCode;
-	Vfd		   *vfdP;
 
 	Assert(FileIsValid(file));
 
@@ -1424,17 +1385,11 @@ FileRead(File file, char *buffer, int amount)
 	if (returnCode < 0)
 		return returnCode;
 
-	vfdP = &VfdCache[file];
-
 retry:
-	returnCode = read(vfdP->fd, buffer, amount);
+	returnCode = read(VfdCache[file].fd, buffer, amount);
 
 	if (returnCode >= 0)
-	{
-		/* if seekPos is unknown, leave it that way */
-		if (!FilePosIsUnknown(vfdP->seekPos))
-			vfdP->seekPos += returnCode;
-	}
+		VfdCache[file].seekPos += returnCode;
 	else
 	{
 		/*
@@ -1463,7 +1418,7 @@ retry:
 			goto retry;
 
 		/* Trouble, so assume we don't know the file position anymore */
-		vfdP->seekPos = FileUnknownPos;
+		VfdCache[file].seekPos = FileUnknownPos;
 	}
 
 	return returnCode;
@@ -1473,7 +1428,6 @@ int
 FileWrite(File file, char *buffer, int amount)
 {
 	int			returnCode;
-	Vfd		   *vfdP;
 
 	Assert(FileIsValid(file));
 
@@ -1486,8 +1440,6 @@ FileWrite(File file, char *buffer, int amount)
 	if (returnCode < 0)
 		return returnCode;
 
-	vfdP = &VfdCache[file];
-
 	/*
 	 * If enforcing temp_file_limit and it's a temp file, check to see if the
 	 * write would overrun temp_file_limit, and throw error if so.  Note: it's
@@ -1496,28 +1448,15 @@ FileWrite(File file, char *buffer, int amount)
 	 * message if we do that.  All current callers would just throw error
 	 * immediately anyway, so this is safe at present.
 	 */
-	if (temp_file_limit >= 0 && (vfdP->fdstate & FD_TEMPORARY))
+	if (temp_file_limit >= 0 && (VfdCache[file].fdstate & FD_TEMPORARY))
 	{
-		off_t		newPos;
+		off_t		newPos = VfdCache[file].seekPos + amount;
 
-		/*
-		 * Normally we should know the seek position, but if for some reason
-		 * we have lost track of it, try again to get it.  Here, it's fine to
-		 * throw an error if we still can't get it.
-		 */
-		if (FilePosIsUnknown(vfdP->seekPos))
-		{
-			vfdP->seekPos = lseek(vfdP->fd, (off_t) 0, SEEK_CUR);
-			if (FilePosIsUnknown(vfdP->seekPos))
-				elog(ERROR, "could not seek file \"%s\": %m", vfdP->fileName);
-		}
-
-		newPos = vfdP->seekPos + amount;
-		if (newPos > vfdP->fileSize)
+		if (newPos > VfdCache[file].fileSize)
 		{
 			uint64		newTotal = temporary_files_size;
 
-			newTotal += newPos - vfdP->fileSize;
+			newTotal += newPos - VfdCache[file].fileSize;
 			if (newTotal > (uint64) temp_file_limit * (uint64) 1024)
 				ereport(ERROR,
 						(errcode(ERRCODE_CONFIGURATION_LIMIT_EXCEEDED),
@@ -1528,7 +1467,7 @@ FileWrite(File file, char *buffer, int amount)
 
 retry:
 	errno = 0;
-	returnCode = write(vfdP->fd, buffer, amount);
+	returnCode = write(VfdCache[file].fd, buffer, amount);
 
 	/* if write didn't set errno, assume problem is no disk space */
 	if (returnCode != amount && errno == 0)
@@ -1536,25 +1475,17 @@ retry:
 
 	if (returnCode >= 0)
 	{
-		/* if seekPos is unknown, leave it that way */
-		if (!FilePosIsUnknown(vfdP->seekPos))
-			vfdP->seekPos += returnCode;
+		VfdCache[file].seekPos += returnCode;
 
-		/*
-		 * Maintain fileSize and temporary_files_size if it's a temp file.
-		 *
-		 * If seekPos is -1 (unknown), this will do nothing; but we could only
-		 * get here in that state if we're not enforcing temporary_files_size,
-		 * so we don't care.
-		 */
-		if (vfdP->fdstate & FD_TEMPORARY)
+		/* maintain fileSize and temporary_files_size if it's a temp file */
+		if (VfdCache[file].fdstate & FD_TEMPORARY)
 		{
-			off_t		newPos = vfdP->seekPos;
+			off_t		newPos = VfdCache[file].seekPos;
 
-			if (newPos > vfdP->fileSize)
+			if (newPos > VfdCache[file].fileSize)
 			{
-				temporary_files_size += newPos - vfdP->fileSize;
-				vfdP->fileSize = newPos;
+				temporary_files_size += newPos - VfdCache[file].fileSize;
+				VfdCache[file].fileSize = newPos;
 			}
 		}
 	}
@@ -1582,7 +1513,7 @@ retry:
 			goto retry;
 
 		/* Trouble, so assume we don't know the file position anymore */
-		vfdP->seekPos = FileUnknownPos;
+		VfdCache[file].seekPos = FileUnknownPos;
 	}
 
 	return returnCode;
@@ -1608,7 +1539,7 @@ FileSync(File file)
 off_t
 FileSeek(File file, off_t offset, int whence)
 {
-	Vfd		   *vfdP;
+	int			returnCode;
 
 	Assert(FileIsValid(file));
 
@@ -1617,33 +1548,25 @@ FileSeek(File file, off_t offset, int whence)
 			   (int64) VfdCache[file].seekPos,
 			   (int64) offset, whence));
 
-	vfdP = &VfdCache[file];
-
 	if (FileIsNotOpen(file))
 	{
 		switch (whence)
 		{
 			case SEEK_SET:
 				if (offset < 0)
-				{
-					errno = EINVAL;
-					return (off_t) -1;
-				}
-				vfdP->seekPos = offset;
+					elog(ERROR, "invalid seek offset: " INT64_FORMAT,
+						 (int64) offset);
+				VfdCache[file].seekPos = offset;
 				break;
 			case SEEK_CUR:
-				if (FilePosIsUnknown(vfdP->seekPos) ||
-					vfdP->seekPos + offset < 0)
-				{
-					errno = EINVAL;
-					return (off_t) -1;
-				}
-				vfdP->seekPos += offset;
+				VfdCache[file].seekPos += offset;
 				break;
 			case SEEK_END:
-				if (FileAccess(file) < 0)
-					return (off_t) -1;
-				vfdP->seekPos = lseek(vfdP->fd, offset, whence);
+				returnCode = FileAccess(file);
+				if (returnCode < 0)
+					return returnCode;
+				VfdCache[file].seekPos = lseek(VfdCache[file].fd,
+											   offset, whence);
 				break;
 			default:
 				elog(ERROR, "invalid whence: %d", whence);
@@ -1656,27 +1579,27 @@ FileSeek(File file, off_t offset, int whence)
 		{
 			case SEEK_SET:
 				if (offset < 0)
-				{
-					errno = EINVAL;
-					return (off_t) -1;
-				}
-				if (vfdP->seekPos != offset)
-					vfdP->seekPos = lseek(vfdP->fd, offset, whence);
+					elog(ERROR, "invalid seek offset: " INT64_FORMAT,
+						 (int64) offset);
+				if (VfdCache[file].seekPos != offset)
+					VfdCache[file].seekPos = lseek(VfdCache[file].fd,
+												   offset, whence);
 				break;
 			case SEEK_CUR:
-				if (offset != 0 || FilePosIsUnknown(vfdP->seekPos))
-					vfdP->seekPos = lseek(vfdP->fd, offset, whence);
+				if (offset != 0 || VfdCache[file].seekPos == FileUnknownPos)
+					VfdCache[file].seekPos = lseek(VfdCache[file].fd,
+												   offset, whence);
 				break;
 			case SEEK_END:
-				vfdP->seekPos = lseek(vfdP->fd, offset, whence);
+				VfdCache[file].seekPos = lseek(VfdCache[file].fd,
+											   offset, whence);
 				break;
 			default:
 				elog(ERROR, "invalid whence: %d", whence);
 				break;
 		}
 	}
-
-	return vfdP->seekPos;
+	return VfdCache[file].seekPos;
 }
 
 /*
@@ -2282,7 +2205,7 @@ CleanupTempFiles(bool isProcExit)
 void
 RemovePgTempFiles(void)
 {
-	char		temp_path[MAXPGPATH + 10 + sizeof(TABLESPACE_VERSION_DIRECTORY) + sizeof(PG_TEMP_FILES_DIR)];
+	char		temp_path[MAXPGPATH];
 	DIR		   *spc_dir;
 	struct dirent *spc_de;
 
@@ -2330,7 +2253,7 @@ RemovePgTempFilesInDir(const char *tmpdirname)
 {
 	DIR		   *temp_dir;
 	struct dirent *temp_de;
-	char		rm_path[MAXPGPATH * 2];
+	char		rm_path[MAXPGPATH];
 
 	temp_dir = AllocateDir(tmpdirname);
 	if (temp_dir == NULL)
@@ -2371,7 +2294,7 @@ RemovePgTempRelationFiles(const char *tsdirname)
 {
 	DIR		   *ts_dir;
 	struct dirent *de;
-	char		dbspace_path[MAXPGPATH * 2];
+	char		dbspace_path[MAXPGPATH];
 
 	ts_dir = AllocateDir(tsdirname);
 	if (ts_dir == NULL)
@@ -2412,7 +2335,7 @@ RemovePgTempRelationFilesInDbspace(const char *dbspacedirname)
 {
 	DIR		   *dbspace_dir;
 	struct dirent *de;
-	char		rm_path[MAXPGPATH * 2];
+	char		rm_path[MAXPGPATH];
 
 	dbspace_dir = AllocateDir(dbspacedirname);
 	if (dbspace_dir == NULL)
@@ -2599,7 +2522,7 @@ walkdir(const char *path,
 
 	while ((de = ReadDirExtended(dir, path, elevel)) != NULL)
 	{
-		char		subpath[MAXPGPATH * 2];
+		char		subpath[MAXPGPATH];
 		struct stat fst;
 		int			sret;
 
@@ -2609,7 +2532,7 @@ walkdir(const char *path,
 			strcmp(de->d_name, "..") == 0)
 			continue;
 
-		snprintf(subpath, sizeof(subpath), "%s/%s", path, de->d_name);
+		snprintf(subpath, MAXPGPATH, "%s/%s", path, de->d_name);
 
 		if (process_symlinks)
 			sret = stat(subpath, &fst);

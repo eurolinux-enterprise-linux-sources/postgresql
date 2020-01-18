@@ -315,9 +315,6 @@ static volatile sig_atomic_t start_autovac_launcher = false;
 /* the launcher needs to be signalled to communicate some condition */
 static volatile bool avlauncher_needs_signal = false;
 
-/* received START_WALRECEIVER signal */
-static volatile sig_atomic_t WalReceiverRequested = false;
-
 /*
  * State for assigning random salts and cancel keys.
  * Also, the global MyCancelKey passes the cancel key assigned to a given
@@ -388,7 +385,6 @@ static int	CountChildren(int target);
 static bool CreateOptsFile(int argc, char *argv[], char *fullprogname);
 static pid_t StartChildProcess(AuxProcType type);
 static void StartAutovacuumWorker(void);
-static void MaybeStartWalReceiver(void);
 static void InitPostmasterDeathWatchHandle(void);
 
 #ifdef EXEC_BACKEND
@@ -1521,8 +1517,7 @@ ServerLoop(void)
 			PgArchPID = pgarch_start();
 
 		/* If we have lost the stats collector, try to start a new one */
-		if (PgStatPID == 0 &&
-			(pmState == PM_RUN || pmState == PM_HOT_STANDBY))
+		if (PgStatPID == 0 && pmState == PM_RUN)
 			PgStatPID = pgstat_start();
 
 		/* If we need to signal the autovacuum launcher, do so now */
@@ -1532,10 +1527,6 @@ ServerLoop(void)
 			if (AutoVacPID != 0)
 				kill(AutoVacPID, SIGUSR2);
 		}
-
-		/* If we need to start a WAL receiver, try to do that now */
-		if (WalReceiverRequested)
-			MaybeStartWalReceiver();
 
 #ifdef HAVE_PTHREAD_IS_THREADED_NP
 
@@ -2644,8 +2635,7 @@ reaper(SIGNAL_ARGS)
 		/*
 		 * Was it the wal receiver?  If exit status is zero (normal) or one
 		 * (FATAL exit), we assume everything is all right just like normal
-		 * backends.  (If we need a new wal receiver, we'll start one at the
-		 * next iteration of the postmaster's main loop.)
+		 * backends.
 		 */
 		if (pid == WalReceiverPID)
 		{
@@ -2700,7 +2690,7 @@ reaper(SIGNAL_ARGS)
 			if (!EXIT_STATUS_0(exitstatus))
 				LogChildExit(LOG, _("statistics collector process"),
 							 pid, exitstatus);
-			if (pmState == PM_RUN || pmState == PM_HOT_STANDBY)
+			if (pmState == PM_RUN)
 				PgStatPID = pgstat_start();
 			continue;
 		}
@@ -3937,7 +3927,6 @@ internal_forkexec(int argc, char *argv[], Port *port)
 static pid_t
 internal_forkexec(int argc, char *argv[], Port *port)
 {
-	int			retry_count = 0;
 	STARTUPINFO si;
 	PROCESS_INFORMATION pi;
 	int			i;
@@ -3954,9 +3943,6 @@ internal_forkexec(int argc, char *argv[], Port *port)
 	Assert(argv[argc] == NULL);
 	Assert(strncmp(argv[1], "--fork", 6) == 0);
 	Assert(argv[2] == NULL);
-
-	/* Resume here if we need to retry */
-retry:
 
 	/* Set up shared memory for parameter passing */
 	ZeroMemory(&sa, sizeof(sa));
@@ -4049,26 +4035,22 @@ retry:
 
 	/*
 	 * Reserve the memory region used by our main shared memory segment before
-	 * we resume the child process.  Normally this should succeed, but if ASLR
-	 * is active then it might sometimes fail due to the stack or heap having
-	 * gotten mapped into that range.  In that case, just terminate the
-	 * process and retry.
+	 * we resume the child process.
 	 */
 	if (!pgwin32_ReserveSharedMemoryRegion(pi.hProcess))
 	{
-		/* pgwin32_ReserveSharedMemoryRegion already made a log entry */
+		/*
+		 * Failed to reserve the memory, so terminate the newly created
+		 * process and give up.
+		 */
 		if (!TerminateProcess(pi.hProcess, 255))
 			ereport(LOG,
 					(errmsg_internal("could not terminate process that failed to reserve memory: error code %lu",
 									 GetLastError())));
 		CloseHandle(pi.hProcess);
 		CloseHandle(pi.hThread);
-		if (++retry_count < 100)
-			goto retry;
-		ereport(LOG,
-				(errmsg("giving up after too many tries to reserve shared memory"),
-				 errhint("This might be caused by ASLR or antivirus software.")));
-		return -1;
+		return -1;				/* logging done made by
+								 * pgwin32_ReserveSharedMemoryRegion() */
 	}
 
 	/*
@@ -4503,12 +4485,14 @@ sigusr1_handler(SIGNAL_ARGS)
 		StartAutovacuumWorker();
 	}
 
-	if (CheckPostmasterSignal(PMSIGNAL_START_WALRECEIVER))
+	if (CheckPostmasterSignal(PMSIGNAL_START_WALRECEIVER) &&
+		WalReceiverPID == 0 &&
+		(pmState == PM_STARTUP || pmState == PM_RECOVERY ||
+		 pmState == PM_HOT_STANDBY || pmState == PM_WAIT_READONLY) &&
+		Shutdown == NoShutdown)
 	{
 		/* Startup Process wants us to start the walreceiver process. */
-		/* Start immediately if possible, else remember request for later. */
-		WalReceiverRequested = true;
-		MaybeStartWalReceiver();
+		WalReceiverPID = StartWalReceiver();
 	}
 
 	if (CheckPostmasterSignal(PMSIGNAL_ADVANCE_STATE_MACHINE) &&
@@ -4619,7 +4603,7 @@ PostmasterRandom(void)
 }
 
 /*
- * Count up number of child processes of specified types (dead_end children
+ * Count up number of child processes of specified types (dead_end chidren
  * are always excluded).
  */
 static int
@@ -4846,24 +4830,6 @@ StartAutovacuumWorker(void)
 		avlauncher_needs_signal = true;
 	}
 }
-
-/*
- * MaybeStartWalReceiver
- *		Start the WAL receiver process, if not running and our state allows.
- */
-static void
-MaybeStartWalReceiver(void)
-{
-	if (WalReceiverPID == 0 &&
-		(pmState == PM_STARTUP || pmState == PM_RECOVERY ||
-		 pmState == PM_HOT_STANDBY || pmState == PM_WAIT_READONLY) &&
-		Shutdown == NoShutdown)
-	{
-		WalReceiverPID = StartWalReceiver();
-		WalReceiverRequested = false;
-	}
-}
-
 
 /*
  * Create the opts file
@@ -5365,7 +5331,7 @@ InitPostmasterDeathWatchHandle(void)
 	 * write fd. That is taken care of in ClosePostmasterPorts().
 	 */
 	Assert(MyProcPid == PostmasterPid);
-	if (pipe(postmaster_alive_fds) < 0)
+	if (pipe(postmaster_alive_fds))
 		ereport(FATAL,
 				(errcode_for_file_access(),
 				 errmsg_internal("could not create pipe to monitor postmaster death: %m")));
@@ -5374,7 +5340,7 @@ InitPostmasterDeathWatchHandle(void)
 	 * Set O_NONBLOCK to allow testing for the fd's presence with a read()
 	 * call.
 	 */
-	if (fcntl(postmaster_alive_fds[POSTMASTER_FD_WATCH], F_SETFL, O_NONBLOCK) == -1)
+	if (fcntl(postmaster_alive_fds[POSTMASTER_FD_WATCH], F_SETFL, O_NONBLOCK))
 		ereport(FATAL,
 				(errcode_for_socket_access(),
 				 errmsg_internal("could not set postmaster death monitoring pipe to non-blocking mode: %m")));

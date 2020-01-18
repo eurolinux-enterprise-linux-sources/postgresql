@@ -142,8 +142,11 @@ Datum
 hashname(PG_FUNCTION_ARGS)
 {
 	char	   *key = NameStr(*PG_GETARG_NAME(0));
+	int			keylen = strlen(key);
 
-	return hash_any((unsigned char *) key, strlen(key));
+	Assert(keylen < NAMEDATALEN);		/* else it's not truncated correctly */
+
+	return hash_any((unsigned char *) key, keylen);
 }
 
 Datum

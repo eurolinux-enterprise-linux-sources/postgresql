@@ -158,8 +158,6 @@ WaitExceedsMaxStandbyDelay(void)
 {
 	TimestampTz ltime;
 
-	CHECK_FOR_INTERRUPTS();
-
 	/* Are we past the limit time? */
 	ltime = GetStandbyLimitTime();
 	if (ltime && GetCurrentTimestamp() >= ltime)
@@ -512,14 +510,14 @@ CheckRecoveryConflictDeadlock(void)
  * one transaction on one relation, and don't worry about lock queuing.
  *
  * We keep a single dynamically expandible list of locks in local memory,
- * RecoveryLockList, so we can keep track of the various entries made by
+ * RelationLockList, so we can keep track of the various entries made by
  * the Startup process's virtual xid in the shared lock table.
  *
  * We record the lock against the top-level xid, rather than individual
  * subtransaction xids. This means AccessExclusiveLocks held by aborted
  * subtransactions are not released as early as possible on standbys.
  *
- * List elements use type xl_standby_lock, since the WAL record type exactly
+ * List elements use type xl_rel_lock, since the WAL record type exactly
  * matches the information that we need to keep track of.
  *
  * We use session locks rather than normal locks so we don't need

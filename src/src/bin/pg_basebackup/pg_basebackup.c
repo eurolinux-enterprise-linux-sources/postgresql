@@ -27,9 +27,7 @@
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <signal.h>
-#ifdef HAVE_SYS_SELECT_H
-#include <sys/select.h>
-#endif
+
 #ifdef HAVE_LIBZ
 #include <zlib.h>
 #endif
@@ -528,10 +526,6 @@ ReceiveTarFile(PGconn *conn, PGresult *res, int rownum)
 		 */
 		if (strcmp(basedir, "-") == 0)
 		{
-#ifdef WIN32
-			_setmode(fileno(stdout), _O_BINARY);
-#endif
-
 #ifdef HAVE_LIBZ
 			if (compresslevel != 0)
 			{

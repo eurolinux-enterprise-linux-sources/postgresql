@@ -4080,18 +4080,13 @@ ATTypedTableRecursion(List **wqueue, Relation rel, AlterTableCmd *cmd,
 /*
  * find_composite_type_dependencies
  *
- * Check to see if the type "typeOid" is being used as a column in some table
- * (possibly nested several levels deep in composite types, arrays, etc!).
+ * Check to see if a composite type is being used as a column in some
+ * other table (possibly nested several levels deep in composite types!).
  * Eventually, we'd like to propagate the check or rewrite operation
- * into such tables, but for now, just error out if we find any.
+ * into other such tables, but for now, just error out if we find any.
  *
- * Caller should provide either the associated relation of a rowtype,
- * or a type name (not both) for use in the error message, if any.
- *
- * Note that "typeOid" is not necessarily a composite type; it could also be
- * another container type such as an array or range, or a domain over one of
- * these things.  The name of this function is therefore somewhat historical,
- * but it's not worth changing.
+ * Caller should provide either a table name or a type name (not both) to
+ * report in the error message, if any.
  *
  * We assume that functions and views depending on the type are not reasons
  * to reject the ALTER.  (How safe is this really?)
@@ -4104,13 +4099,11 @@ find_composite_type_dependencies(Oid typeOid, Relation origRelation,
 	ScanKeyData key[2];
 	SysScanDesc depScan;
 	HeapTuple	depTup;
-
-	/* since this function recurses, it could be driven to stack overflow */
-	check_stack_depth();
+	Oid			arrayOid;
 
 	/*
-	 * We scan pg_depend to find those things that depend on the given type.
-	 * (We assume we can ignore refobjsubid for a type.)
+	 * We scan pg_depend to find those things that depend on the rowtype. (We
+	 * assume we can ignore refobjsubid for a rowtype.)
 	 */
 	depRel = heap_open(DependRelationId, AccessShareLock);
 
@@ -4132,22 +4125,8 @@ find_composite_type_dependencies(Oid typeOid, Relation origRelation,
 		Relation	rel;
 		Form_pg_attribute att;
 
-		/* Check for directly dependent types */
-		if (pg_depend->classid == TypeRelationId)
-		{
-			/*
-			 * This must be an array, domain, or range containing the given
-			 * type, so recursively check for uses of this type.  Note that
-			 * any error message will mention the original type not the
-			 * container; this is intentional.
-			 */
-			find_composite_type_dependencies(pg_depend->objid,
-											 origRelation, origTypeName);
-			continue;
-		}
-
-		/* Else, ignore dependees that aren't user columns of relations */
-		/* (we assume system columns are never of interesting types) */
+		/* Ignore dependees that aren't user columns of relations */
+		/* (we assume system columns are never of rowtypes) */
 		if (pg_depend->classid != RelationRelationId ||
 			pg_depend->objsubid <= 0)
 			continue;
@@ -4202,6 +4181,14 @@ find_composite_type_dependencies(Oid typeOid, Relation origRelation,
 	systable_endscan(depScan);
 
 	relation_close(depRel, AccessShareLock);
+
+	/*
+	 * If there's an array type for the rowtype, must check for uses of it,
+	 * too.
+	 */
+	arrayOid = get_array_type(typeOid);
+	if (OidIsValid(arrayOid))
+		find_composite_type_dependencies(arrayOid, origRelation, origTypeName);
 }
 
 
@@ -5674,7 +5661,7 @@ ATAddCheckConstraint(List **wqueue, AlteredTableInfo *tab, Relation rel,
 
 	/*
 	 * Check if ONLY was specified with ALTER TABLE.  If so, allow the
-	 * constraint creation only if there are no children currently.  Error out
+	 * contraint creation only if there are no children currently.  Error out
 	 * otherwise.
 	 */
 	if (!recurse && children != NIL)
@@ -6201,10 +6188,9 @@ ATExecValidateConstraint(Relation rel, char *constrName, bool recurse,
 
 			/*
 			 * If we're recursing, the parent has already done this, so skip
-			 * it.  Also, if the constraint is a NO INHERIT constraint, we
-			 * shouldn't try to look for it in the children.
+			 * it.
 			 */
-			if (!recursing && !con->connoinherit)
+			if (!recursing)
 				children = find_all_inheritors(RelationGetRelid(rel),
 											   lockmode, NULL);
 
@@ -7002,24 +6988,6 @@ ATExecDropConstraint(Relation rel, const char *constrName,
 		 */
 		if (con->contype != CONSTRAINT_CHECK)
 			is_no_inherit_constraint = true;
-
-		/*
-		 * If it's a foreign-key constraint, we'd better lock the referenced
-		 * table and check that that's not in use, just as we've already done
-		 * for the constrained table (else we might, eg, be dropping a trigger
-		 * that has unfired events).  But we can/must skip that in the
-		 * self-referential case.
-		 */
-		if (con->contype == CONSTRAINT_FOREIGN &&
-			con->confrelid != RelationGetRelid(rel))
-		{
-			Relation	frel;
-
-			/* Must match lock taken by RemoveTriggerById: */
-			frel = heap_open(con->confrelid, AccessExclusiveLock);
-			CheckTableNotInUse(frel, "ALTER TABLE");
-			heap_close(frel, NoLock);
-		}
 
 		/*
 		 * Perform the actual constraint deletion
@@ -9277,39 +9245,6 @@ MergeAttributesIntoExisting(Relation child_rel, Relation parent_rel)
 		}
 	}
 
-	/*
-	 * If the parent has an OID column, so must the child, and we'd better
-	 * update the child's attinhcount and attislocal the same as for normal
-	 * columns.  We needn't check data type or not-nullness though.
-	 */
-	if (tupleDesc->tdhasoid)
-	{
-		/*
-		 * Here we match by column number not name; the match *must* be the
-		 * system column, not some random column named "oid".
-		 */
-		tuple = SearchSysCacheCopy2(ATTNUM,
-							   ObjectIdGetDatum(RelationGetRelid(child_rel)),
-									Int16GetDatum(ObjectIdAttributeNumber));
-		if (HeapTupleIsValid(tuple))
-		{
-			Form_pg_attribute childatt = (Form_pg_attribute) GETSTRUCT(tuple);
-
-			/* See comments above; these changes should be the same */
-			childatt->attinhcount++;
-			simple_heap_update(attrrel, &tuple->t_self, tuple);
-			CatalogUpdateIndexes(attrrel, tuple);
-			heap_freetuple(tuple);
-		}
-		else
-		{
-			ereport(ERROR,
-					(errcode(ERRCODE_DATATYPE_MISMATCH),
-					 errmsg("child table is missing column \"%s\"",
-							"oid")));
-		}
-	}
-
 	heap_close(attrrel, RowExclusiveLock);
 }
 
@@ -9392,22 +9327,11 @@ MergeConstraintsIntoExisting(Relation child_rel, Relation parent_rel)
 								RelationGetRelationName(child_rel),
 								NameStr(parent_con->conname))));
 
-			/* If the child constraint is "no inherit" then cannot merge */
+			/* If the constraint is "no inherit" then cannot merge */
 			if (child_con->connoinherit)
 				ereport(ERROR,
 						(errcode(ERRCODE_INVALID_OBJECT_DEFINITION),
 						 errmsg("constraint \"%s\" conflicts with non-inherited constraint on child table \"%s\"",
-								NameStr(child_con->conname),
-								RelationGetRelationName(child_rel))));
-
-			/*
-			 * If the child constraint is "not valid" then cannot merge with a
-			 * valid parent constraint
-			 */
-			if (parent_con->convalidated && !child_con->convalidated)
-				ereport(ERROR,
-						(errcode(ERRCODE_INVALID_OBJECT_DEFINITION),
-						 errmsg("constraint \"%s\" conflicts with NOT VALID constraint on child table \"%s\"",
 								NameStr(child_con->conname),
 								RelationGetRelationName(child_rel))));
 

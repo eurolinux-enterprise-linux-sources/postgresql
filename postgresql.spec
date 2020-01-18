@@ -62,7 +62,7 @@
 Summary: PostgreSQL client programs
 Name: postgresql
 %global majorversion 9.2
-Version: 9.2.21
+Version: 9.2.23
 Release: 1%{?dist}
 
 # The PostgreSQL license is very similar to other MIT licenses, but the OSI
@@ -1162,6 +1162,14 @@ fi
 %endif
 
 %changelog
+* Tue Aug 29 2017 Petr Kubat <pkubat@redhat.com> - 9.2.23-1
+- update to 9.2.23 per release notes
+  http://www.postgresql.org/docs/9.2/static/release-9-2-23.html
+
+* Thu Aug 24 2017 Petr Kubat <pkubat@redhat.com> - 9.2.22-1
+- update to 9.2.22 per release notes
+  http://www.postgresql.org/docs/9.2/static/release-9-2-22.html
+
 * Thu May 11 2017 Petr Kubat <pkubat@redhat.com> - 9.2.21-1
 - update to 9.2.21 per release notes
   http://www.postgresql.org/docs/9.2/static/release-9-2-21.html

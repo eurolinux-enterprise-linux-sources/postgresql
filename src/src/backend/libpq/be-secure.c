@@ -289,10 +289,12 @@ rloop:
 				ereport(COMMERROR,
 						(errcode(ERRCODE_PROTOCOL_VIOLATION),
 						 errmsg("SSL error: %s", SSLerrmessage(ecode))));
-				/* fall through */
-			case SSL_ERROR_ZERO_RETURN:
 				errno = ECONNRESET;
 				n = -1;
+				break;
+			case SSL_ERROR_ZERO_RETURN:
+				/* connection was cleanly shut down by peer */
+				n = 0;
 				break;
 			default:
 				ereport(COMMERROR,
@@ -414,8 +416,14 @@ wloop:
 				ereport(COMMERROR,
 						(errcode(ERRCODE_PROTOCOL_VIOLATION),
 						 errmsg("SSL error: %s", SSLerrmessage(ecode))));
-				/* fall through */
+				errno = ECONNRESET;
+				n = -1;
+				break;
 			case SSL_ERROR_ZERO_RETURN:
+				/*
+				 * the SSL connnection was closed, leave it to the caller
+				 * to ereport it
+				 */
 				errno = ECONNRESET;
 				n = -1;
 				break;
@@ -926,6 +934,14 @@ initialize_SSL(void)
 	/* set up ephemeral DH keys, and disallow SSL v2 while at it */
 	SSL_CTX_set_tmp_dh_callback(SSL_context, tmp_dh_cb);
 	SSL_CTX_set_options(SSL_context, SSL_OP_SINGLE_DH_USE | SSL_OP_NO_SSLv2);
+
+	/* disallow SSL session tickets */
+#ifdef SSL_OP_NO_TICKET			/* added in openssl 0.9.8f */
+	SSL_CTX_set_options(SSL_context, SSL_OP_NO_TICKET);
+#endif
+
+	/* disallow SSL session caching, too */
+	SSL_CTX_set_session_cache_mode(SSL_context, SSL_SESS_CACHE_OFF);
 
 	/* set up the allowed cipher list */
 	if (SSL_CTX_set_cipher_list(SSL_context, SSLCipherSuites) != 1)

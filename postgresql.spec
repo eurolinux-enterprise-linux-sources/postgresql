@@ -63,7 +63,7 @@ Summary: PostgreSQL client programs
 Name: postgresql
 %global majorversion 9.2
 Version: 9.2.23
-Release: 1%{?dist}
+Release: 3%{?dist}
 
 # The PostgreSQL license is very similar to other MIT licenses, but the OSI
 # recognizes it as an independent license, so we do as well.
@@ -1162,6 +1162,12 @@ fi
 %endif
 
 %changelog
+* Mon Nov 06 2017 Pavel Raiskup <praiskup@redhat.com> - 9.2.23-3
+- setup: keep PGSETUP_* variables after switching to not-privileged user
+
+* Mon Oct 23 2017 Pavel Raiskup <praiskup@redhat.com> - 9.2.23-2
+- fix CVE-2017-12172
+
 * Tue Aug 29 2017 Petr Kubat <pkubat@redhat.com> - 9.2.23-1
 - update to 9.2.23 per release notes
   http://www.postgresql.org/docs/9.2/static/release-9-2-23.html

@@ -358,7 +358,7 @@ SetWALFileNameForCleanup(void)
 	if (keepfiles > 0)
 	{
 		sscanf(nextWALFileName, "%08X%08X%08X", &tli, &log, &seg);
-		if (tli > 0 && log >= 0 && seg > 0)
+		if (tli > 0 && seg > 0)
 		{
 			log_diff = keepfiles / MaxSegmentsPerLogFile;
 			seg_diff = keepfiles % MaxSegmentsPerLogFile;
@@ -806,7 +806,7 @@ main(int argc, char **argv)
 		{
 			/*
 			 * Once we have restored this file successfully we can remove some
-			 * prior WAL files. If this restore fails we musn't remove any
+			 * prior WAL files. If this restore fails we mustn't remove any
 			 * file because some of them will be requested again immediately
 			 * after the failed restore, or when we restart recovery.
 			 */

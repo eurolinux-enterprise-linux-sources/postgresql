@@ -62,7 +62,7 @@
 Summary: PostgreSQL client programs
 Name: postgresql
 %global majorversion 9.2
-Version: 9.2.18
+Version: 9.2.21
 Release: 1%{?dist}
 
 # The PostgreSQL license is very similar to other MIT licenses, but the OSI
@@ -268,6 +268,15 @@ needed to compile C or C++ applications which will directly interact
 with a PostgreSQL database management server.  It also contains the ecpg
 Embedded C Postgres preprocessor. You need to install this package if you want
 to develop applications which will interact with a PostgreSQL server.
+
+
+%package static
+Summary: Statically linked PostgreSQL libraries
+Requires: %{name}-devel%{?_isa} = %{version}-%{release}
+
+%description static
+Statically linked PostgreSQL libraries that do not have dynamically linked
+counterparts.
 
 
 %if %upgrade
@@ -765,7 +774,7 @@ mv $RPM_BUILD_ROOT%{_docdir}/pgsql/html doc
 rm -rf $RPM_BUILD_ROOT%{_docdir}/pgsql
 
 # remove files not to be packaged
-rm -f $RPM_BUILD_ROOT%{_libdir}/*.a
+rm $RPM_BUILD_ROOT%{_libdir}/{libecpg,libpq,libecpg_compat,libpgtypes}.a
 %if !%upgrade
 rm -f $RPM_BUILD_ROOT%{_bindir}/pg_upgrade
 rm -f $RPM_BUILD_ROOT%{_libdir}/pgsql/pg_upgrade_support.so
@@ -1105,6 +1114,9 @@ fi
 %{_mandir}/man1/ecpg.*
 %{_mandir}/man3/SPI_*
 
+%files static
+%{_libdir}/libpgport.a
+
 %if %upgrade
 %files upgrade
 %{_bindir}/pg_upgrade
@@ -1150,6 +1162,15 @@ fi
 %endif
 
 %changelog
+* Thu May 11 2017 Petr Kubat <pkubat@redhat.com> - 9.2.21-1
+- update to 9.2.21 per release notes
+  http://www.postgresql.org/docs/9.2/static/release-9-2-21.html
+  http://www.postgresql.org/docs/9.2/static/release-9-2-20.html
+  http://www.postgresql.org/docs/9.2/static/release-9-2-19.html
+
+* Wed Feb 22 2017 Pavel Raiskup <praiskup@redhat.com> - 9.2.18-2
+- package libpgport.a (rhbz#1305979)
+
 * Wed Aug 17 2016 Petr Kubat <pkubat@redhat.com> - 9.2.18-1
 - update to 9.2.18 per release notes
   http://www.postgresql.org/docs/9.2/static/release-9-2-18.html

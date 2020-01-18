@@ -551,16 +551,22 @@ prepare_for_client_read(void)
 
 /*
  * client_read_ended -- get out of the client-input state
+ *
+ * This is called just after low-level reads.  It must preserve errno!
  */
 void
 client_read_ended(void)
 {
 	if (DoingCommandRead)
 	{
+		int			save_errno = errno;
+
 		ImmediateInterruptOK = false;
 
 		DisableNotifyInterrupt();
 		DisableCatchupInterrupt();
+
+		errno = save_errno;
 	}
 }
 
@@ -824,7 +830,7 @@ pg_plan_queries(List *querytrees, int cursorOptions, ParamListInfo boundParams)
 
 	foreach(query_list, querytrees)
 	{
-		Query	   *query = (Query *) lfirst(query_list);
+		Query	   *query = castNode(Query, lfirst(query_list));
 		Node	   *stmt;
 
 		if (query->commandType == CMD_UTILITY)
@@ -4113,19 +4119,7 @@ PostgresMain(int argc, char *argv[],
 				/* switch back to message context */
 				MemoryContextSwitchTo(MessageContext);
 
-				if (HandleFunctionRequest(&input_message) == EOF)
-				{
-					/* lost frontend connection during F message input */
-
-					/*
-					 * Reset whereToSendOutput to prevent ereport from
-					 * attempting to send any more messages to client.
-					 */
-					if (whereToSendOutput == DestRemote)
-						whereToSendOutput = DestNone;
-
-					proc_exit(0);
-				}
+				HandleFunctionRequest(&input_message);
 
 				/* commit the function-invocation transaction */
 				finish_xact_command();

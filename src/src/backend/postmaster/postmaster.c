@@ -1517,7 +1517,8 @@ ServerLoop(void)
 			PgArchPID = pgarch_start();
 
 		/* If we have lost the stats collector, try to start a new one */
-		if (PgStatPID == 0 && pmState == PM_RUN)
+		if (PgStatPID == 0 &&
+			(pmState == PM_RUN || pmState == PM_HOT_STANDBY))
 			PgStatPID = pgstat_start();
 
 		/* If we need to signal the autovacuum launcher, do so now */
@@ -2690,7 +2691,7 @@ reaper(SIGNAL_ARGS)
 			if (!EXIT_STATUS_0(exitstatus))
 				LogChildExit(LOG, _("statistics collector process"),
 							 pid, exitstatus);
-			if (pmState == PM_RUN)
+			if (pmState == PM_RUN || pmState == PM_HOT_STANDBY)
 				PgStatPID = pgstat_start();
 			continue;
 		}
@@ -4603,7 +4604,7 @@ PostmasterRandom(void)
 }
 
 /*
- * Count up number of child processes of specified types (dead_end chidren
+ * Count up number of child processes of specified types (dead_end children
  * are always excluded).
  */
 static int
@@ -5331,7 +5332,7 @@ InitPostmasterDeathWatchHandle(void)
 	 * write fd. That is taken care of in ClosePostmasterPorts().
 	 */
 	Assert(MyProcPid == PostmasterPid);
-	if (pipe(postmaster_alive_fds))
+	if (pipe(postmaster_alive_fds) < 0)
 		ereport(FATAL,
 				(errcode_for_file_access(),
 				 errmsg_internal("could not create pipe to monitor postmaster death: %m")));
@@ -5340,7 +5341,7 @@ InitPostmasterDeathWatchHandle(void)
 	 * Set O_NONBLOCK to allow testing for the fd's presence with a read()
 	 * call.
 	 */
-	if (fcntl(postmaster_alive_fds[POSTMASTER_FD_WATCH], F_SETFL, O_NONBLOCK))
+	if (fcntl(postmaster_alive_fds[POSTMASTER_FD_WATCH], F_SETFL, O_NONBLOCK) == -1)
 		ereport(FATAL,
 				(errcode_for_socket_access(),
 				 errmsg_internal("could not set postmaster death monitoring pipe to non-blocking mode: %m")));

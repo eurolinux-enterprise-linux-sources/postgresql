@@ -99,7 +99,7 @@ gettoken_query(QPRS_STATE *state, int4 *val, int4 *lenval, char **strval, uint16
 					if (*flag)
 						ereport(ERROR,
 								(errcode(ERRCODE_SYNTAX_ERROR),
-								 errmsg("modificators syntax error")));
+								 errmsg("modifiers syntax error")));
 					*lenval += charlen;
 				}
 				else if (charlen == 1 && t_iseq(state->buf, '%'))
@@ -201,7 +201,7 @@ pushval_asis(QPRS_STATE *state, int type, char *strval, int lenval, uint16 flag)
 
 #define STACKDEPTH		32
 /*
- * make polish notaion of query
+ * make polish notation of query
  */
 static int4
 makepol(QPRS_STATE *state)
